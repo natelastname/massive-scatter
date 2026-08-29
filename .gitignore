@@ -1,57 +1,36 @@
-# -*- mode: gitignore; -*-
-
-######################################################################
-# Emacs
-######################################################################
-*~
-\#*\#
-/.emacs.desktop
-/.emacs.desktop.lock
-*.elc
-flycheck_*.el
-
-######################################################################
-# Python
-######################################################################
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-
-# C extensions
-*.so
+*$py.class
 
 # Distribution / packaging
+build/
+dist/
 *.egg-info/
-*.egg
-.env
 
-######################################################################
-# Vim
-######################################################################
-# Swap
-[._]*.s[a-v][a-z]
-!*.svg  # comment out if you don't need vector files
-[._]*.sw[a-p]
-[._]s[a-rt-v][a-z]
-[._]ss[a-gi-z]
-[._]sw[a-p]
-# Session
-Session.vim
-Sessionx.vim
-# Temporary
-.netrwhist
-*~
-# Auto-generated tag files
-tags
-# Persistent undo
-[._]*.un~
+# Virtual environments
+.venv/
+venv/
 
-######################################################################
-# Npm
-######################################################################
-node_modules
-dist
+# Tests / type checking / lint
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
 
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
 
-.tox
+# JavaScript
+node_modules/
+viewer/dist/
+
+# massive-scatter datasets
+*.msplot/
+*.msplot.tmp-*/
+
+src/massive_scatter/_viewer/

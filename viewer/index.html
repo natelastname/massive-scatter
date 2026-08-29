@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>massive-scatter</title>
+  </head>
+  <body>
+    <main id="app">
+      <div id="plot"></div>
+      <svg id="axes" aria-hidden="true"></svg>
+      <header class="panel title-panel">
+        <strong>massive-scatter</strong>
+        <span id="dataset-summary">loading manifest…</span>
+      </header>
+      <section class="panel controls-panel">
+        <button id="fit" type="button">Fit</button>
+        <label>
+          exact limit
+          <input id="max-points" type="number" min="1000" max="1000000" step="1000" value="200000" />
+        </label>
+      </section>
+      <footer class="panel status-panel" id="status">loading…</footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
