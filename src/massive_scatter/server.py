@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
 
 from .dataset import MassiveScatterDataset
+
+
+class ViewRequest(BaseModel):
+    """Viewport request carried in the POST body rather than the URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    width: int = Field(default=1_024, ge=1, le=16_384)
+    height: int = Field(default=768, ge=1, le=16_384)
+    max_points: int = Field(default=200_000, ge=1, le=1_000_000)
+    max_cells: int = Field(default=200_000, ge=1, le=1_000_000)
 
 
 def _find_viewer(viewer_dir: str | Path | None) -> Path | None:
@@ -39,27 +55,18 @@ def create_app(
     def manifest() -> dict[str, Any]:
         return dataset.manifest.to_dict()
 
-    @app.get("/api/view")
-    def view(
-        xmin: Annotated[float, Query()],
-        xmax: Annotated[float, Query()],
-        ymin: Annotated[float, Query()],
-        ymax: Annotated[float, Query()],
-        width: Annotated[int, Query(ge=1, le=16_384)] = 1_024,
-        height: Annotated[int, Query(ge=1, le=16_384)] = 768,
-        max_points: Annotated[int, Query(ge=1, le=1_000_000)] = 200_000,
-        max_cells: Annotated[int, Query(ge=1, le=1_000_000)] = 200_000,
-    ) -> dict[str, Any]:
+    @app.post("/api/view")
+    def view(request: ViewRequest) -> dict[str, Any]:
         try:
             return dataset.view(
-                min_x=xmin,
-                max_x=xmax,
-                min_y=ymin,
-                max_y=ymax,
-                pixel_width=width,
-                pixel_height=height,
-                max_points=max_points,
-                max_cells=max_cells,
+                min_x=request.xmin,
+                max_x=request.xmax,
+                min_y=request.ymin,
+                max_y=request.ymax,
+                pixel_width=request.width,
+                pixel_height=request.height,
+                max_points=request.max_points,
+                max_cells=request.max_cells,
             )
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error

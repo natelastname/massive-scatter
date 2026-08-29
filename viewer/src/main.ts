@@ -8,6 +8,13 @@ import {
 import {ScatterplotLayer} from '@deck.gl/layers';
 import {format as d3format} from 'd3-format';
 import {scaleLinear} from 'd3-scale';
+import {
+  localToWorld,
+  toRenderViewState,
+  toWorldViewState,
+  type Origin,
+  type OrthographicState,
+} from './frame';
 import './style.css';
 
 interface Manifest {
@@ -31,11 +38,6 @@ interface ViewResponse {
   level?: number;
 }
 
-interface OrthographicState {
-  target: [number, number, number];
-  zoom: number;
-}
-
 interface PlotDatum {
   position: [number, number];
   value: number;
@@ -46,11 +48,12 @@ const plot = requiredElement<HTMLDivElement>('plot');
 const axes = requiredElement<SVGSVGElement>('axes');
 const status = requiredElement<HTMLElement>('status');
 const summary = requiredElement<HTMLElement>('dataset-summary');
-const fitButton = requiredElement<HTMLButtonElement>('fit');
+const homeButton = requiredElement<HTMLButtonElement>('home');
 const maxPointsInput = requiredElement<HTMLInputElement>('max-points');
 
 let manifest: Manifest;
-let viewState: OrthographicState = {target: [0, 0, 0], zoom: 0};
+let worldViewState: OrthographicState = {target: [0, 0, 0], zoom: 0};
+let renderOrigin: Origin = [0, 0];
 let currentResponse: ViewResponse | null = null;
 let requestTimer: number | undefined;
 let activeRequest: AbortController | null = null;
@@ -59,13 +62,14 @@ const integerFormat = d3format(',');
 const deck = new Deck({
   parent: plot,
   views: new OrthographicView({id: 'scatter', controller: true}),
-  viewState,
+  viewState: toRenderViewState(worldViewState, renderOrigin),
   layers: [],
   controller: true,
   getTooltip: (info: PickingInfo<PlotDatum>) => tooltip(info),
   onViewStateChange: ({viewState: next}: ViewStateChangeParameters) => {
-    viewState = next as OrthographicState;
-    deck.setProps({viewState});
+    const renderViewState = next as OrthographicState;
+    worldViewState = toWorldViewState(renderViewState, renderOrigin);
+    deck.setProps({viewState: renderViewState});
     renderAxes();
     scheduleViewRequest();
   },
@@ -78,29 +82,29 @@ function requiredElement<T extends Element>(id: string): T {
 }
 
 function visibleBounds() {
-  const scale = 2 ** viewState.zoom;
+  const scale = 2 ** worldViewState.zoom;
   const halfWidth = plot.clientWidth / (2 * scale);
   const halfHeight = plot.clientHeight / (2 * scale);
   return {
-    minX: viewState.target[0] - halfWidth,
-    maxX: viewState.target[0] + halfWidth,
-    minY: viewState.target[1] - halfHeight,
-    maxY: viewState.target[1] + halfHeight,
+    minX: worldViewState.target[0] - halfWidth,
+    maxX: worldViewState.target[0] + halfWidth,
+    minY: worldViewState.target[1] - halfHeight,
+    maxY: worldViewState.target[1] + halfHeight,
   };
 }
 
-function fit() {
+function goHome() {
   if (!manifest) return;
   const availableWidth = Math.max(1, plot.clientWidth - 100);
   const availableHeight = Math.max(1, plot.clientHeight - 80);
   const worldWidth = Math.max(1, manifest.extent.width - 1);
   const worldHeight = Math.max(1, manifest.extent.height - 1);
   const scale = Math.min(availableWidth / worldWidth, availableHeight / worldHeight);
-  viewState = {
+  worldViewState = {
     target: [worldWidth / 2, worldHeight / 2, 0],
     zoom: Math.log2(Math.max(scale, Number.MIN_VALUE)),
   };
-  deck.setProps({viewState});
+  deck.setProps({viewState: toRenderViewState(worldViewState, renderOrigin)});
   renderAxes();
   scheduleViewRequest(0);
 }
@@ -113,23 +117,30 @@ function scheduleViewRequest(delay = 75) {
 async function requestView() {
   if (!manifest || plot.clientWidth < 1 || plot.clientHeight < 1) return;
   activeRequest?.abort();
-  activeRequest = new AbortController();
+  const controller = new AbortController();
+  activeRequest = controller;
   const bounds = visibleBounds();
-  const query = new URLSearchParams({
-    xmin: String(bounds.minX),
-    xmax: String(bounds.maxX),
-    ymin: String(bounds.minY),
-    ymax: String(bounds.maxY),
-    width: String(plot.clientWidth),
-    height: String(plot.clientHeight),
-    max_points: String(Math.max(1, Number(maxPointsInput.value) || 200_000)),
-    max_cells: '200000',
-  });
+  const body = {
+    xmin: bounds.minX,
+    xmax: bounds.maxX,
+    ymin: bounds.minY,
+    ymax: bounds.maxY,
+    width: plot.clientWidth,
+    height: plot.clientHeight,
+    max_points: Math.max(1, Number(maxPointsInput.value) || 200_000),
+    max_cells: 200_000,
+  };
   status.textContent = 'loading viewport…';
 
   try {
-    const response = await fetch(`/api/view?${query}`, {signal: activeRequest.signal});
+    const response = await fetch('/api/view', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    if (controller !== activeRequest) return;
     currentResponse = (await response.json()) as ViewResponse;
     renderLayer(currentResponse);
   } catch (error) {
@@ -160,13 +171,20 @@ function renderLayer(response: ViewResponse) {
   const aggregate = response.mode === 'aggregate';
   const radius = aggregate ? (response.cell_size ?? 1) * 0.46 : 0.42;
 
+  // The response positions are local to response.origin. Rebase the camera into
+  // the same local frame before replacing the layer. This keeps a change in LOD
+  // or viewport origin from translating the rendered data and keeps large world
+  // coordinates out of GPU float32 state.
+  renderOrigin = response.origin;
+  const renderViewState = toRenderViewState(worldViewState, renderOrigin);
+
   deck.setProps({
+    viewState: renderViewState,
     layers: [
       new ScatterplotLayer<PlotDatum>({
         id: `points-${response.mode}-${response.level ?? 'native'}`,
         data,
         coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-        coordinateOrigin: [response.origin[0], response.origin[1], 0],
         getPosition: datum => datum.position,
         getRadius: radius,
         radiusUnits: 'common',
@@ -210,8 +228,7 @@ function colorFor(value: number, minValue: number, maxValue: number): [number, n
 
 function tooltip(info: PickingInfo<PlotDatum>) {
   if (!manifest || !currentResponse || !info.object) return null;
-  const relativeX = currentResponse.origin[0] + info.object.position[0];
-  const relativeY = currentResponse.origin[1] + info.object.position[1];
+  const [relativeX, relativeY] = localToWorld(renderOrigin, info.object.position);
   const absoluteX = addIntegerOffset(manifest.origin.x, relativeX);
   const absoluteY = addIntegerOffset(manifest.origin.y, relativeY);
   const countLine = currentResponse.mode === 'aggregate' ? `<br/>count: ${integerFormat(info.object.count)}` : '';
@@ -266,7 +283,10 @@ function appendText(x: number, y: number, value: string, anchor: 'start' | 'midd
   axes.append(text);
 }
 
-fitButton.addEventListener('click', fit);
+homeButton.addEventListener('click', goHome);
+window.addEventListener('keydown', event => {
+  if (event.key === 'Home' && document.activeElement !== maxPointsInput) goHome();
+});
 maxPointsInput.addEventListener('change', () => scheduleViewRequest(0));
 new ResizeObserver(() => {
   renderAxes();
@@ -278,7 +298,7 @@ async function start() {
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
   manifest = (await response.json()) as Manifest;
   summary.textContent = `${integerFormat(manifest.point_count)} points · ${integerFormat(manifest.extent.width)} × ${integerFormat(manifest.extent.height)} units`;
-  fit();
+  goHome();
 }
 
 void start().catch(error => {

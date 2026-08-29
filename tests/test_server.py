@@ -18,9 +18,9 @@ def test_api_serves_manifest_and_view(tmp_path):
     assert manifest.status_code == 200
     assert manifest.json()["point_count"] == 3
 
-    view = client.get(
+    view = client.post(
         "/api/view",
-        params={
+        json={
             "xmin": 0,
             "xmax": 2,
             "ymin": 0,
@@ -32,3 +32,4 @@ def test_api_serves_manifest_and_view(tmp_path):
     assert view.status_code == 200
     assert view.json()["mode"] == "exact"
     assert view.json()["point_count"] == 3
+    assert client.get("/api/view").status_code == 405

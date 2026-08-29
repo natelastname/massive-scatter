@@ -135,8 +135,10 @@ and a few fixed-size Zarr chunks—not by the total point count or viewport area
 Absolute source coordinates are retained as signed `int64`. The manifest writes
 absolute origins as decimal strings, so a JavaScript parser cannot round them.
 The viewer works in offsets from the dataset origin and each API response uses a
-second viewport-local origin. deck.gl therefore receives small point offsets
-instead of large absolute float32 values.
+second viewport-local origin. Both the deck.gl camera and layer positions are
+rebased into that same response-local frame whenever the origin changes. The GPU
+therefore never has to reconcile small local point offsets with a large global
+camera target.
 
 The tested invariant is:
 
@@ -149,13 +151,20 @@ segmented/BigInt camera state, not merely a different storage type.
 
 ## View API
 
-`GET /api/view` takes dataset-relative viewport bounds:
+`POST /api/view` accepts dataset-relative viewport data as JSON in the request
+body rather than encoding the camera state in the URL:
 
-```text
-xmin, xmax, ymin, ymax
-width, height
-max_points (default 200000)
-max_cells  (default 200000)
+```json
+{
+  "xmin": 0,
+  "xmax": 1000000,
+  "ymin": 0,
+  "ymax": 1000000,
+  "width": 1200,
+  "height": 800,
+  "max_points": 200000,
+  "max_cells": 200000
+}
 ```
 
 At high zoom the response contains exact points as offsets from a local origin.
@@ -172,6 +181,7 @@ uv run basedpyright
 uv run pytest
 
 cd viewer
+npm test
 npm run build
 ```
 

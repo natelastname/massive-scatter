@@ -37,8 +37,9 @@ jobs:
           cache: npm
           cache-dependency-path: viewer/package-lock.json
 
-      - name: Build viewer
+      - name: Test and build viewer
         working-directory: viewer
         run: |
           npm ci
+          npm test
           npm run build
