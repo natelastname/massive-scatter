@@ -95,8 +95,10 @@ function visibleBounds() {
 
 function goHome() {
   if (!manifest) return;
-  const availableWidth = Math.max(1, plot.clientWidth - 100);
-  const availableHeight = Math.max(1, plot.clientHeight - 80);
+  // The deck canvas already occupies exactly the interior axes rectangle.
+  // Keep only a small visual pad so edge markers are not clipped by the frame.
+  const availableWidth = Math.max(1, plot.clientWidth - 24);
+  const availableHeight = Math.max(1, plot.clientHeight - 24);
   const worldWidth = Math.max(1, manifest.extent.width - 1);
   const worldHeight = Math.max(1, manifest.extent.height - 1);
   const scale = Math.min(availableWidth / worldWidth, availableHeight / worldHeight);
