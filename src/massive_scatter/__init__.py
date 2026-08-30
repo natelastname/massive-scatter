@@ -1,6 +1,8 @@
-# -*- coding: utf-8 -*-
-"""
-Created on 2026-08-29T14:29:31-04:00
+"""Build and view precision-preserving, out-of-core scatter plots."""
 
-@author: nate
-"""
+from .builder import BuildConfig, build_dataset
+from .dataset import MassiveScatterDataset
+from .manifest import Manifest
+
+__all__ = ["BuildConfig", "Manifest", "MassiveScatterDataset", "build_dataset"]
+__version__ = "0.1.0"

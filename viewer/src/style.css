@@ -1,0 +1,85 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e7edf3;
+  background: #0b1016;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+#app { position: relative; background: #0b1016; }
+#plot {
+  position: absolute;
+  left: 52px;
+  right: 18px;
+  top: 18px;
+  bottom: 30px;
+  overflow: hidden;
+}
+#axes { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+.panel {
+  position: absolute;
+  z-index: 2;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(12, 18, 25, 0.88);
+  box-shadow: 0 0.35rem 1.5rem rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+}
+
+.title-panel {
+  top: 1rem;
+  left: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.5rem;
+}
+.title-panel strong { font-size: 0.95rem; letter-spacing: 0.02em; }
+.title-panel span { color: #aab8c5; font-size: 0.75rem; }
+
+.controls-panel {
+  top: 1rem;
+  right: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+}
+.controls-panel label { display: flex; align-items: center; gap: 0.45rem; color: #b9c5cf; }
+button, input {
+  color: inherit;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.07);
+  border-radius: 0.35rem;
+  padding: 0.35rem 0.5rem;
+}
+button { cursor: pointer; }
+button:hover { background: rgba(255,255,255,0.13); }
+input { width: 7rem; }
+
+.status-panel {
+  left: 50%;
+  bottom: 0.8rem;
+  transform: translateX(-50%);
+  padding: 0.45rem 0.7rem;
+  border-radius: 999px;
+  color: #c3ced8;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.axis-line, .tick-line { stroke: rgba(225, 235, 244, 0.38); stroke-width: 1; }
+.tick-label { fill: rgba(225, 235, 244, 0.72); font-size: 11px; }
+
+.deck-tooltip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  font-size: 12px !important;
+  background: rgba(7, 11, 16, 0.94) !important;
+  border: 1px solid rgba(255,255,255,0.16) !important;
+  border-radius: 0.35rem !important;
+}
