@@ -1,7 +1,6 @@
 import {
   COORDINATE_SYSTEM,
   Deck,
-  OrthographicView,
   type PickingInfo,
   type ViewStateChangeParameters,
 } from '@deck.gl/core';
@@ -15,6 +14,7 @@ import {
   type Origin,
   type OrthographicState,
 } from './frame';
+import {createPlotView} from './plot-view';
 import './style.css';
 
 interface Manifest {
@@ -61,7 +61,7 @@ const integerFormat = d3format(',');
 
 const deck = new Deck({
   parent: plot,
-  views: new OrthographicView({id: 'scatter', controller: true}),
+  views: createPlotView(),
   viewState: toRenderViewState(worldViewState, renderOrigin),
   layers: [],
   controller: true,
