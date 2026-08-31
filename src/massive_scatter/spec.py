@@ -208,7 +208,10 @@ class PlotManifest:
         return cls(
             scatter=ScatterManifest.from_dict(value["scatter"]),
             axes=AxesManifest.from_dict(value.get("axes", {})),
-            exact_fields={str(k): str(v) for k, v in value.get("exact_fields", {}).items()},
+            exact_fields={
+                str(k): str(v)
+                for k, v in value.get("exact_fields", {}).items()
+            },
             categorical_fields={
                 str(k): tuple(str(item) for item in items)
                 for k, items in value.get("categorical_fields", {}).items()
@@ -312,9 +315,22 @@ def compile_encodings(
     else:
         register_field(color.source, "numeric")
         aggregate = register_aggregate(color, "mean")
-        color_encoding = EncodingManifest("field", source=color.source, aggregate=aggregate)
+        color_encoding = EncodingManifest(
+            "field", source=color.source, aggregate=aggregate
+        )
 
-    known_markers = {"o", "circle", "s", "square", "^", "triangle", "D", "diamond", "x", "+"}
+    known_markers = {
+        "o",
+        "circle",
+        "s",
+        "square",
+        "^",
+        "triangle",
+        "D",
+        "diamond",
+        "x",
+        "+",
+    }
     if isinstance(marker, FieldValue):
         register_field(marker.source, "categorical")
         marker_encoding = EncodingManifest("field", source=marker.source)
@@ -335,7 +351,10 @@ def compile_encodings(
 
     alpha_encoding = numeric_encoding(alpha, default_reducer="mean")
 
-    exact_fields = {source: f"field_{index:03d}" for index, source in enumerate(exact_sources)}
+    exact_fields = {
+        source: f"field_{index:03d}"
+        for index, source in enumerate(exact_sources)
+    }
     aggregates = tuple(
         AggregateRequest(
             key=_aggregate_key(index),

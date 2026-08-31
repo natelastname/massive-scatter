@@ -72,7 +72,9 @@ class Axes:
                 "The first plot grammar supports one scatter layer per axes."
             )
         if c is not None and color is not None:
-            raise ValueError("Pass either c= for a data mapping or color= for a constant.")
+            raise ValueError(
+                "Pass either c= for a data mapping or color= for a constant."
+            )
         self._scatter = _ScatterCall(
             source=source,
             x=x,
@@ -130,6 +132,8 @@ class Figure:
     @staticmethod
     def _compile(call: _ScatterCall, axes: AxesManifest) -> CompiledPlot:
         if call.color is not None:
+            # compile_encodings treats a string color as a field mapping, so use
+            # a harmless placeholder and replace the resulting color manifest.
             compiled = compile_encodings(
                 x=call.x,
                 y=call.y,

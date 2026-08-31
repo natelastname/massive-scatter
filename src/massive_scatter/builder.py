@@ -105,7 +105,8 @@ def _canonical_table(
                 or pa.types.is_dictionary(field.type)
             ):
                 raise TypeError(
-                    f"Categorical field {source!r} must contain scalar strings, numbers, or booleans."
+                    f"Categorical field {source!r} must contain scalar strings, "
+                    "numbers, or booleans."
                 )
             field = pc.cast(field, pa.string(), safe=False)
         else:
@@ -162,8 +163,9 @@ def _write_point_parts(
                     values[str(item)] = None
                     if len(values) > MAX_CATEGORIES:
                         raise ValueError(
-                            f"Categorical field {source!r} has more than {MAX_CATEGORIES} "
-                            "values; high-cardinality categorical summaries are not supported yet."
+                            f"Categorical field {source!r} has more than "
+                            f"{MAX_CATEGORIES} values; high-cardinality categorical "
+                            "summaries are not supported yet."
                         )
 
     def flush() -> None:
@@ -306,7 +308,9 @@ def build_dataset(
         exact_fields, field_kinds, aggregates = _legacy_contract(color)
     else:
         if plot.x != x or plot.y != y:
-            raise ValueError("Compiled plot x/y fields disagree with build_dataset x/y.")
+            raise ValueError(
+                "Compiled plot x/y fields disagree with build_dataset x/y."
+            )
         exact_fields = plot.exact_fields
         field_kinds = dict(plot.field_kinds)
         aggregates = plot.aggregates

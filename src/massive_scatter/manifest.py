@@ -72,7 +72,8 @@ class Manifest:
     def validate(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError(
-                f"Unsupported manifest schema {self.schema_version}; expected {SCHEMA_VERSION}."
+                f"Unsupported manifest schema {self.schema_version}; "
+                f"expected {SCHEMA_VERSION}."
             )
         if self.point_count <= 0:
             raise ValueError("A plot must contain at least one point.")
@@ -112,11 +113,13 @@ class Manifest:
         for request in self.aggregates:
             if request.source not in self.exact_fields:
                 raise ValueError(
-                    f"Aggregate {request.key!r} refers to unknown exact field {request.source!r}."
+                    f"Aggregate {request.key!r} refers to unknown exact field "
+                    f"{request.source!r}."
                 )
             if self.exact_fields[request.source] != request.storage:
                 raise ValueError(
-                    f"Aggregate {request.key!r} storage disagrees with exact field mapping."
+                    f"Aggregate {request.key!r} storage disagrees with exact "
+                    "field mapping."
                 )
         if self.plot is not None and self.plot.exact_fields != self.exact_fields:
             raise ValueError("Plot and manifest exact-field mappings disagree.")

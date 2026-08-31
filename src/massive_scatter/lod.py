@@ -283,7 +283,11 @@ def _downsample_extreme(values: np.ndarray, *, reducer: str) -> np.ndarray:
     )
     padded[:height, :width] = np.where(np.isnan(values), fill, values)
     reshaped = padded.reshape(padded.shape[0] // 2, 2, padded.shape[1] // 2, 2)
-    result = reshaped.min(axis=(1, 3)) if reducer == "min" else reshaped.max(axis=(1, 3))
+    result = (
+        reshaped.min(axis=(1, 3))
+        if reducer == "min"
+        else reshaped.max(axis=(1, 3))
+    )
     result[~np.isfinite(result)] = np.nan
     return result
 
@@ -304,18 +308,26 @@ def _merge_parent_state(
     child_prefix = f"levels/{child_level}/aggregates/{request.key}"
     parent_prefix = f"levels/{parent_level}/aggregates/{request.key}"
     if request.reducer in {"sum", "mean"}:
-        child = np.asarray(_array(root, f"{child_prefix}/sum")[child_ys, child_xs], dtype=np.float64)
+        child = np.asarray(
+            _array(root, f"{child_prefix}/sum")[child_ys, child_xs],
+            dtype=np.float64,
+        )
         reduced = _downsample_sum(child)
         parent_array = _array(root, f"{parent_prefix}/sum")
         target = np.asarray(parent_array[target_ys, target_xs], dtype=np.float64)
         target[:source_height, :source_width] += reduced[:source_height, :source_width]
         parent_array[target_ys, target_xs] = target
     if request.reducer == "mean":
-        child_n = np.asarray(_array(root, f"{child_prefix}/count")[child_ys, child_xs], dtype=np.uint64)
+        child_n = np.asarray(
+            _array(root, f"{child_prefix}/count")[child_ys, child_xs],
+            dtype=np.uint64,
+        )
         reduced_n = _downsample_sum(child_n)
         parent_n_array = _array(root, f"{parent_prefix}/count")
         target_n = np.asarray(parent_n_array[target_ys, target_xs], dtype=np.uint64)
-        target_n[:source_height, :source_width] += reduced_n[:source_height, :source_width]
+        target_n[:source_height, :source_width] += reduced_n[
+            :source_height, :source_width
+        ]
         parent_n_array[target_ys, target_xs] = target_n
     elif request.reducer in {"min", "max"}:
         child_values = np.asarray(
@@ -326,14 +338,15 @@ def _merge_parent_state(
         parent_array = _array(root, f"{parent_prefix}/value")
         target = np.asarray(parent_array[target_ys, target_xs], dtype=np.float64)
         source = reduced_values[:source_height, :source_width]
+        target_slice = target[:source_height, :source_width]
         if request.reducer == "min":
             merged = np.minimum(
-                np.where(np.isnan(target[:source_height, :source_width]), np.inf, target[:source_height, :source_width]),
+                np.where(np.isnan(target_slice), np.inf, target_slice),
                 np.where(np.isnan(source), np.inf, source),
             )
         else:
             merged = np.maximum(
-                np.where(np.isnan(target[:source_height, :source_width]), -np.inf, target[:source_height, :source_width]),
+                np.where(np.isnan(target_slice), -np.inf, target_slice),
                 np.where(np.isnan(source), -np.inf, source),
             )
         merged[~np.isfinite(merged)] = np.nan

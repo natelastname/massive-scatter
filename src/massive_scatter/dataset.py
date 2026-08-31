@@ -61,6 +61,7 @@ class MassiveScatterDataset:
     def _exact_storage_fields(self) -> dict[str, str]:
         if self.manifest.exact_fields:
             return self.manifest.exact_fields
+        # Backwards-compatible reader for pre-grammar .msplot datasets.
         if self.manifest.color_field:
             return {self.manifest.color_field: "color"}
         return {}
@@ -289,6 +290,7 @@ class MassiveScatterDataset:
             if request is not None:
                 legacy_color = aggregate_values[request.key]
             elif not self.manifest.aggregates:
+                # Pre-grammar dataset layout.
                 color_array = _array(
                     self._lod, f"levels/{level.level}/color_max"
                 )
@@ -410,7 +412,8 @@ class MassiveScatterDataset:
                     state = _array(self._lod, state_path)
                     if tuple(state.shape) != (level.height, level.width):
                         problems.append(
-                            f"LOD {level.level} aggregate {request.key} shape differs from manifest"
+                            f"LOD {level.level} aggregate {request.key} shape "
+                            "differs from manifest"
                         )
 
         top = self.manifest.levels[-1]

@@ -4,7 +4,17 @@ from .builder import BuildConfig, build_dataset
 from .dataset import MassiveScatterDataset
 from .manifest import Manifest
 from .plot import Axes, Figure, subplots
-from .spec import AggregatePlan, CountValue, FieldValue, count, field, max, mean, min, sum
+from .spec import (
+    AggregatePlan,
+    CountValue,
+    FieldValue,
+    count,
+    field,
+    max,
+    mean,
+    min,
+    sum,
+)
 
 __all__ = [
     "AggregatePlan",
