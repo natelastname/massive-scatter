@@ -262,9 +262,9 @@ def _write_point_parts(
     )
 
 
-def _legacy_contract(color: str | None) -> tuple[
-    dict[str, str], dict[str, str], tuple[AggregateRequest, ...]
-]:
+def _legacy_contract(
+    color: str | None,
+) -> tuple[dict[str, str], dict[str, str], tuple[AggregateRequest, ...]]:
     if color is None:
         return {}, {}, ()
     return (
