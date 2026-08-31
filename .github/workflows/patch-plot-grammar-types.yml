@@ -1,0 +1,71 @@
+name: Patch plot grammar types
+
+on:
+  push:
+    branches:
+      - feature/plot-grammar-20260830
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Fix plot grammar type checks [skip patch]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch builder type checks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/massive_scatter/builder.py')
+          text = path.read_text()
+          text = text.replace(
+              'from collections.abc import Callable, Iterable',
+              'from collections.abc import Callable, Iterable, Mapping',
+          )
+          text = text.replace(
+              '    exact_fields: dict[str, str],\n    field_kinds: dict[str, str],',
+              '    exact_fields: Mapping[str, str],\n    field_kinds: Mapping[str, str],',
+          )
+          text = text.replace('pc.unique(column).to_pylist()', 'column.unique().to_pylist()')
+          path.write_text(text)
+          PY
+      - name: Write builder through GitHub REST API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          path = 'src/massive_scatter/builder.py'
+          token = os.environ['GH_TOKEN']
+          repo = os.environ['REPO']
+          branch = os.environ['BRANCH']
+          headers = {
+              'Authorization': f'Bearer {token}',
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+          def request(method, url, payload=None):
+              body = None if payload is None else json.dumps(payload).encode()
+              req = Request(url, data=body, headers=headers, method=method)
+              with urlopen(req) as response:
+                  return json.load(response)
+          current = request('GET', f'https://api.github.com/repos/{repo}/contents/{quote(path)}?ref={quote(branch)}')
+          content = base64.b64encode(Path(path).read_bytes()).decode()
+          request('PUT', f'https://api.github.com/repos/{repo}/contents/{quote(path)}', {
+              'message': 'Fix plot grammar type checks [skip patch]',
+              'content': content,
+              'sha': current['sha'],
+              'branch': branch,
+          })
+          PY
