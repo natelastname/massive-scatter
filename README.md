@@ -2,15 +2,15 @@
 
 `massive-scatter` builds zoomable scatter plots whose logical dimensions can be
 far larger than an in-memory raster. Exact points remain the source of truth;
-zoomed-out views use sparse numerical level-of-detail (LOD) arrays rather than a
-pyramid of pre-rendered PNG tiles.
+zoomed-out views use occupied-cell-only level-of-detail (LOD) tables rather than a
+dense grid or a pyramid of pre-rendered PNG tiles.
 
 The project is aimed at integer-coordinate scientific sequences and similarly
 sparse point sets:
 
 - exact `int64` coordinates stored in partitioned Parquet;
 - bounded-memory Arrow batch ingestion;
-- sparse Zarr v3 numerical LOD arrays;
+- occupied-cell-only Parquet LOD levels with mergeable reducer state;
 - exact-point responses at high zoom and aggregate square-cell responses at low
   zoom;
 - mergeable field reductions (`sum`, `mean`, `min`, `max`) compiled from plot
@@ -28,19 +28,33 @@ image. Its canonical artifact is approximately:
 ```text
 example.msplot/
 ├── manifest.json          # bounds, int64 origin, plot grammar, LOD metadata
-├── index.parquet          # bounding box and count for each point part
+├── index.parquet          # bounding box and count for each exact-point part
 ├── points/
 │   └── part-*.parquet     # exact points and exact-only style fields
-└── lod.zarr/
-    └── levels/*/
-        ├── count
-        └── aggregates/
-            └── */         # mergeable reducer state
+└── lod/
+    ├── 0/
+    │   ├── index.parquet  # coarse bounding boxes for LOD parts
+    │   └── part-*.parquet # one row per occupied cell
+    ├── 1/
+    │   └── ...
+    └── ...
 ```
 
 The finest numerical LOD begins at `base_cell_size` units per cell (64 by
 default). Below that scale the viewer asks for exact points. Aggregate cells are
 rendered as the square spatial bins they represent.
+
+Only occupied cells are stored. Empty cells in the logical rectangle consume no
+LOD rows, files, or chunks. During construction a temporary on-disk SQLite
+B-tree merges duplicate occupied cells. Parent levels are formed by shifting the
+cell coordinates by one binary digit and merging the same sufficient statistics,
+then each level is streamed to sorted Parquet parts. The temporary SQLite build
+index is deleted when the dataset is complete.
+
+This matters for extreme-aspect-ratio data. A plot can have millions of points
+spread across billions of logical cells without degenerating into millions of
+small dense storage chunks; an isolated occupied cell is just one compact table
+row.
 
 ## Installation
 
@@ -447,11 +461,14 @@ not approximated with arbitrary rules simply to mimic a Matplotlib call shape.
 
 ## Compatibility and `.msplot` schema
 
-New generalized plot-grammar datasets are written as `.msplot` schema v2.
+New datasets are written as `.msplot` schema v3 and use
+`lod_storage="sparse_parquet"`. Schema v3 stores one row per occupied LOD cell
+rather than a logically dense Zarr array split into sparse chunks.
 
-The current reader remains backward-compatible with legacy schema-v1 datasets,
-including the former hard-coded `color_max` LOD layout. Existing `.msplot` files
-therefore do not need to be rebuilt merely to use the new reader.
+The reader remains backward-compatible with schema-v1 and schema-v2 Zarr
+artifacts, including the former hard-coded `color_max` layout. Existing
+`.msplot` files therefore remain readable; rebuilding them is only necessary if
+you want the new sparse-Parquet storage behavior.
 
 The lower-level historical API also remains supported:
 
@@ -494,16 +511,17 @@ build_dataset(
 )
 ```
 
-Peak build memory is governed by the caller's batch, one output Parquet part,
-and a small number of fixed-size Zarr chunks—not by total point count or
-rectangular extent.
+Peak build memory is governed by the caller's batch and bounded Parquet/SQLite
+working buffers—not by total point count or rectangular extent. The temporary
+SQLite aggregation index is allowed to spill to disk and is removed after the
+portable Parquet LOD hierarchy has been written.
 
 Important build controls:
 
 ```text
 --batch-size       Arrow/Parquet scan batch size (default 131072)
 --part-rows        target rows per exact-point Parquet part (default 1000000)
---tile-size        numerical Zarr chunk width/height (default 256)
+--tile-size        legacy Zarr chunk setting; schema-v3 sparse LOD does not use it
 --base-cell-size   first aggregate cell width/height in native units (default 64)
 --overwrite        replace an existing output dataset
 ```
@@ -546,8 +564,8 @@ segmented/BigInt camera state, not merely a different storage type.
 
 At high zoom the response contains exact points and requested exact style fields
 as offsets from a local origin. If the exact result exceeds the point budget,
-the server selects a Zarr LOD and returns finalized aggregate values plus cell
-counts. No raster image tiles are generated or transferred.
+the server selects a sparse Parquet LOD and returns finalized aggregate values
+plus cell counts. No raster image tiles are generated or transferred.
 
 ## Development
 
