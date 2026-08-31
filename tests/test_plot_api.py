@@ -77,8 +77,7 @@ def test_plot_api_compiles_fields_reducers_and_axes(tmp_path):
     )
     assert aggregate["mode"] == "aggregate"
     by_request = {
-        item.reducer: aggregate["aggregates"][item.key]
-        for item in manifest.aggregates
+        item.reducer: aggregate["aggregates"][item.key] for item in manifest.aggregates
     }
     assert math.isclose(by_request["mean"][0], 13.0 / 3.0)
     assert by_request["max"][0] == 9.0
