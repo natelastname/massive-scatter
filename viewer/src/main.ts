@@ -4,7 +4,7 @@ import {
   type PickingInfo,
   type ViewStateChangeParameters,
 } from '@deck.gl/core';
-import {ScatterplotLayer} from '@deck.gl/layers';
+import {GridCellLayer, ScatterplotLayer} from '@deck.gl/layers';
 import {format as d3format} from 'd3-format';
 import {scaleLinear} from 'd3-scale';
 import {
@@ -14,6 +14,7 @@ import {
   type Origin,
   type OrthographicState,
 } from './frame';
+import {aggregateCellCorner} from './lod-cell';
 import {createPlotView} from './plot-view';
 import './style.css';
 
@@ -171,7 +172,6 @@ function renderLayer(response: ViewResponse) {
     count: counts?.[index] ?? 1,
   }));
   const aggregate = response.mode === 'aggregate';
-  const radius = aggregate ? (response.cell_size ?? 1) * 0.46 : 0.42;
 
   // The response positions are local to response.origin. Rebase the camera into
   // the same local frame before replacing the layer. This keeps a change in LOD
@@ -180,24 +180,38 @@ function renderLayer(response: ViewResponse) {
   renderOrigin = response.origin;
   const renderViewState = toRenderViewState(worldViewState, renderOrigin);
 
-  deck.setProps({
-    viewState: renderViewState,
-    layers: [
-      new ScatterplotLayer<PlotDatum>({
-        id: `points-${response.mode}-${response.level ?? 'native'}`,
+  const layer = aggregate
+    ? new GridCellLayer<PlotDatum>({
+        id: `cells-${response.level ?? 'aggregate'}`,
+        data,
+        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+        cellSize: response.cell_size ?? 1,
+        coverage: 1,
+        extruded: false,
+        getPosition: datum =>
+          aggregateCellCorner(datum.position, response.cell_size ?? 1),
+        getFillColor: datum => colorFor(datum.value, minValue, maxValue),
+        opacity: 0.88,
+        pickable: true,
+      })
+    : new ScatterplotLayer<PlotDatum>({
+        id: 'points-native',
         data,
         coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
         getPosition: datum => datum.position,
-        getRadius: radius,
+        getRadius: 0.42,
         radiusUnits: 'common',
-        radiusMinPixels: aggregate ? 0.8 : 1.35,
-        radiusMaxPixels: aggregate ? 72 : 5,
+        radiusMinPixels: 1.35,
+        radiusMaxPixels: 5,
         getFillColor: datum => colorFor(datum.value, minValue, maxValue),
-        opacity: aggregate ? 0.88 : 0.92,
+        opacity: 0.92,
         stroked: false,
         pickable: true,
-      }),
-    ],
+      });
+
+  deck.setProps({
+    viewState: renderViewState,
+    layers: [layer],
   });
 
   const rendered = data.length;
