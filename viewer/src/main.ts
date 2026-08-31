@@ -15,6 +15,7 @@ import {
   type OrthographicState,
 } from './frame';
 import {aggregateCellCorner} from './lod-cell';
+import {LatestRequestRunner} from './latest-request';
 import {createPlotView} from './plot-view';
 import {
   colorMap,
@@ -119,7 +120,7 @@ let renderOrigin: Origin = [0, 0];
 let currentResponse: ViewResponse | null = null;
 let currentColorRange: [number, number] | null = null;
 let requestTimer: number | undefined;
-let activeRequest: AbortController | null = null;
+const viewRequests = new LatestRequestRunner<ViewResponse>();
 const integerFormat = d3format(',');
 const compactFormat = d3format('.5~g');
 
@@ -178,11 +179,8 @@ function scheduleViewRequest(delay = 75) {
   requestTimer = window.setTimeout(() => void requestView(), delay);
 }
 
-async function requestView() {
+function requestView() {
   if (!manifest || plot.clientWidth < 1 || plot.clientHeight < 1) return;
-  activeRequest?.abort();
-  const controller = new AbortController();
-  activeRequest = controller;
   const bounds = visibleBounds();
   const body = {
     xmin: bounds.minX,
@@ -196,21 +194,24 @@ async function requestView() {
   };
   status.textContent = 'loading viewport…';
 
-  try {
-    const response = await fetch('/api/view', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
-    if (controller !== activeRequest) return;
-    currentResponse = (await response.json()) as ViewResponse;
-    renderLayer(currentResponse);
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') return;
-    status.textContent = `request failed: ${String(error)}`;
-  }
+  viewRequests.enqueue(
+    async () => {
+      const response = await fetch('/api/view', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+      return (await response.json()) as ViewResponse;
+    },
+    response => {
+      currentResponse = response;
+      renderLayer(response);
+    },
+    error => {
+      status.textContent = `request failed: ${String(error)}`;
+    },
+  );
 }
 
 function responseData(response: ViewResponse): PlotDatum[] {
