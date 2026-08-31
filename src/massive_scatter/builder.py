@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,8 +57,8 @@ def _canonical_table(
     *,
     x_field: str,
     y_field: str,
-    exact_fields: dict[str, str],
-    field_kinds: dict[str, str],
+    exact_fields: Mapping[str, str],
+    field_kinds: Mapping[str, str],
 ) -> pa.Table:
     table = (
         pa.Table.from_batches([value]) if isinstance(value, pa.RecordBatch) else value
@@ -122,8 +122,8 @@ def _write_point_parts(
     *,
     x_field: str,
     y_field: str,
-    exact_fields: dict[str, str],
-    field_kinds: dict[str, str],
+    exact_fields: Mapping[str, str],
+    field_kinds: Mapping[str, str],
     part_rows: int,
     progress: Progress,
 ) -> _IngestResult:
@@ -159,7 +159,7 @@ def _write_point_parts(
                 )
             else:
                 values = category_values[source]
-                for item in pc.unique(column).to_pylist():
+                for item in column.unique().to_pylist():
                     values[str(item)] = None
                     if len(values) > MAX_CATEGORIES:
                         raise ValueError(
