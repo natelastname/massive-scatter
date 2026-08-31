@@ -291,9 +291,7 @@ class MassiveScatterDataset:
                 legacy_color = aggregate_values[request.key]
             elif not self.manifest.aggregates:
                 # Pre-grammar dataset layout.
-                color_array = _array(
-                    self._lod, f"levels/{level.level}/color_max"
-                )
+                color_array = _array(self._lod, f"levels/{level.level}/color_max")
                 colors = np.asarray(color_array[y0:y1, x0:x1], dtype=np.float64)
                 legacy_color = colors[local_y, local_x].tolist()
 
@@ -404,9 +402,11 @@ class MassiveScatterDataset:
                 paths = (
                     [f"{prefix}/sum", f"{prefix}/count"]
                     if request.reducer == "mean"
-                    else [f"{prefix}/sum"]
-                    if request.reducer == "sum"
-                    else [f"{prefix}/value"]
+                    else (
+                        [f"{prefix}/sum"]
+                        if request.reducer == "sum"
+                        else [f"{prefix}/value"]
+                    )
                 )
                 for state_path in paths:
                     state = _array(self._lod, state_path)
