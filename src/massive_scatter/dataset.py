@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import zarr
 
 from .manifest import LevelManifest, Manifest
+from .spec import AggregateRequest
 
 
 def _array(group: zarr.Group, path: str) -> zarr.Array:
@@ -53,8 +54,17 @@ class MassiveScatterDataset:
             "x": [],
             "y": [],
             "color": None,
+            "fields": {},
             "point_count": 0,
         }
+
+    def _exact_storage_fields(self) -> dict[str, str]:
+        if self.manifest.exact_fields:
+            return self.manifest.exact_fields
+        # Backwards-compatible reader for pre-grammar .msplot datasets.
+        if self.manifest.color_field:
+            return {self.manifest.color_field: "color"}
+        return {}
 
     def _exact_view(
         self,
@@ -87,11 +97,13 @@ class MassiveScatterDataset:
             & (pads.field("y") >= absolute_min_y)
             & (pads.field("y") <= absolute_max_y)
         )
-        columns = ["x", "y"] + (["color"] if self.manifest.color_field else [])
+        storage_fields = self._exact_storage_fields()
+        storage_columns = list(dict.fromkeys(storage_fields.values()))
+        columns = ["x", "y", *storage_columns]
 
         x_values: list[int] = []
         y_values: list[int] = []
-        color_values: list[float] | None = [] if self.manifest.color_field else None
+        field_values: dict[str, list[Any]] = {source: [] for source in storage_fields}
         count = 0
         for batch in dataset.to_batches(
             columns=columns,
@@ -106,24 +118,27 @@ class MassiveScatterDataset:
 
             absolute_x = np.asarray(batch.column(0), dtype=np.int64)
             absolute_y = np.asarray(batch.column(1), dtype=np.int64)
-            # Subtract int64 dataset origins on the CPU. The values sent to the
-            # GPU are small offsets from a viewport-local origin.
             relative_x = absolute_x - self.manifest.min_x - origin_x
             relative_y = absolute_y - self.manifest.min_y - origin_y
             x_values.extend(int(value) for value in relative_x)
             y_values.extend(int(value) for value in relative_y)
-            if color_values is not None:
-                color_values.extend(
-                    float(value)
-                    for value in np.asarray(batch.column(2), dtype=np.float64)
-                )
 
+            for source, storage in storage_fields.items():
+                index = columns.index(storage)
+                field_values[source].extend(batch.column(index).to_pylist())
+
+        legacy_color = (
+            field_values.get(self.manifest.color_field)
+            if self.manifest.color_field is not None
+            else None
+        )
         return {
             "mode": "exact",
             "origin": [origin_x, origin_y],
             "x": x_values,
             "y": y_values,
-            "color": color_values,
+            "color": legacy_color,
+            "fields": field_values,
             "point_count": len(x_values),
         }
 
@@ -158,6 +173,45 @@ class MassiveScatterDataset:
                 break
             level = self.manifest.levels[level.level + 1]
         return level
+
+    def _finalized_aggregate(
+        self,
+        request: AggregateRequest,
+        *,
+        level: int,
+        y0: int,
+        y1: int,
+        x0: int,
+        x1: int,
+        local_y: np.ndarray,
+        local_x: np.ndarray,
+    ) -> list[float]:
+        prefix = f"levels/{level}/aggregates/{request.key}"
+        if request.reducer == "sum":
+            state = np.asarray(
+                _array(self._lod, f"{prefix}/sum")[y0:y1, x0:x1],
+                dtype=np.float64,
+            )
+            selected = state[local_y, local_x]
+        elif request.reducer == "mean":
+            sums = np.asarray(
+                _array(self._lod, f"{prefix}/sum")[y0:y1, x0:x1],
+                dtype=np.float64,
+            )
+            counts = np.asarray(
+                _array(self._lod, f"{prefix}/count")[y0:y1, x0:x1],
+                dtype=np.uint64,
+            )
+            selected_sums = sums[local_y, local_x]
+            selected_counts = counts[local_y, local_x]
+            selected = selected_sums / selected_counts
+        else:
+            state = np.asarray(
+                _array(self._lod, f"{prefix}/value")[y0:y1, x0:x1],
+                dtype=np.float64,
+            )
+            selected = state[local_y, local_x]
+        return [float(value) for value in selected]
 
     def _aggregate_view(
         self,
@@ -197,6 +251,7 @@ class MassiveScatterDataset:
                 "y": [],
                 "count": [],
                 "color": None,
+                "aggregates": {},
                 "cell_count": 0,
             }
 
@@ -204,17 +259,41 @@ class MassiveScatterDataset:
         counts = np.asarray(count_array[y0:y1, x0:x1], dtype=np.uint64)
         local_y, local_x = np.nonzero(counts)
         selected_counts = counts[local_y, local_x]
-        # A cell is rendered at its center. base_cell_size is normally even;
-        # half-unit centers are still exactly representable in binary.
         half = cell_size / 2
         x_values = (local_x.astype(np.float64) * cell_size + half).tolist()
         y_values = (local_y.astype(np.float64) * cell_size + half).tolist()
 
-        color_values: list[float] | None = None
+        aggregate_values = {
+            request.key: self._finalized_aggregate(
+                request,
+                level=level.level,
+                y0=y0,
+                y1=y1,
+                x0=x0,
+                x1=x1,
+                local_y=local_y,
+                local_x=local_x,
+            )
+            for request in self.manifest.aggregates
+        }
+
+        legacy_color: list[float] | None = None
         if self.manifest.color_field:
-            color_array = _array(self._lod, f"levels/{level.level}/color_max")
-            colors = np.asarray(color_array[y0:y1, x0:x1], dtype=np.float64)
-            color_values = colors[local_y, local_x].tolist()
+            request = next(
+                (
+                    item
+                    for item in self.manifest.aggregates
+                    if item.source == self.manifest.color_field
+                ),
+                None,
+            )
+            if request is not None:
+                legacy_color = aggregate_values[request.key]
+            elif not self.manifest.aggregates:
+                # Pre-grammar dataset layout.
+                color_array = _array(self._lod, f"levels/{level.level}/color_max")
+                colors = np.asarray(color_array[y0:y1, x0:x1], dtype=np.float64)
+                legacy_color = colors[local_y, local_x].tolist()
 
         return {
             "mode": "aggregate",
@@ -224,7 +303,8 @@ class MassiveScatterDataset:
             "x": x_values,
             "y": y_values,
             "count": [int(value) for value in selected_counts],
-            "color": color_values,
+            "color": legacy_color,
+            "aggregates": aggregate_values,
             "cell_count": len(x_values),
         }
 
@@ -240,8 +320,6 @@ class MassiveScatterDataset:
         max_points: int = 200_000,
         max_cells: int = 200_000,
     ) -> dict[str, Any]:
-        """Return exact local-offset points when feasible, otherwise an LOD summary."""
-
         values = (min_x, max_x, min_y, max_y)
         if not all(math.isfinite(value) for value in values):
             raise ValueError("Viewport bounds must be finite.")
@@ -303,8 +381,6 @@ class MassiveScatterDataset:
         )
 
     def check(self) -> list[str]:
-        """Return integrity problems; an empty list means the dataset is consistent."""
-
         problems: list[str] = []
         indexed_count = sum(int(part["count"]) for part in self._parts)
         if indexed_count != self.manifest.point_count:
@@ -321,6 +397,24 @@ class MassiveScatterDataset:
             count = _array(self._lod, f"levels/{level.level}/count")
             if tuple(count.shape) != (level.height, level.width):
                 problems.append(f"LOD {level.level} shape differs from manifest")
+            for request in self.manifest.aggregates:
+                prefix = f"levels/{level.level}/aggregates/{request.key}"
+                paths = (
+                    [f"{prefix}/sum", f"{prefix}/count"]
+                    if request.reducer == "mean"
+                    else (
+                        [f"{prefix}/sum"]
+                        if request.reducer == "sum"
+                        else [f"{prefix}/value"]
+                    )
+                )
+                for state_path in paths:
+                    state = _array(self._lod, state_path)
+                    if tuple(state.shape) != (level.height, level.width):
+                        problems.append(
+                            f"LOD {level.level} aggregate {request.key} shape "
+                            "differs from manifest"
+                        )
 
         top = self.manifest.levels[-1]
         top_count_array = _array(self._lod, f"levels/{top.level}/count")

@@ -11,6 +11,7 @@ import pyarrow.parquet as pq
 import zarr
 
 from .manifest import LevelManifest
+from .spec import AggregateRequest
 
 Progress = Callable[[str], None]
 
@@ -29,8 +30,6 @@ def _shape_2d(array: zarr.Array) -> tuple[int, int]:
 
 
 class _OccupiedChunks:
-    """Disk-backed set of occupied Zarr chunks used while building parents."""
-
     def __init__(self, path: Path) -> None:
         self._connection = sqlite3.connect(path)
         self._connection.execute("""
@@ -74,35 +73,74 @@ class _OccupiedChunks:
         self._connection.close()
 
 
+def _create_numeric_array(
+    group: zarr.Group,
+    name: str,
+    *,
+    shape: tuple[int, int],
+    tile_size: int,
+    dtype: str,
+    fill_value,
+) -> zarr.Array:
+    return group.create_array(
+        name=name,
+        shape=shape,
+        chunks=(tile_size, tile_size),
+        dtype=dtype,
+        fill_value=fill_value,
+        config={"write_empty_chunks": False},
+    )
+
+
 def _create_level_arrays(
     root: zarr.Group,
     *,
     level: int,
     shape: tuple[int, int],
     tile_size: int,
-    has_color: bool,
-) -> tuple[zarr.Array, zarr.Array | None]:
+    aggregates: tuple[AggregateRequest, ...],
+) -> zarr.Array:
     levels = root.require_group("levels")
     level_group = levels.create_group(str(level))
-    count = level_group.create_array(
-        name="count",
+    count = _create_numeric_array(
+        level_group,
+        "count",
         shape=shape,
-        chunks=(tile_size, tile_size),
+        tile_size=tile_size,
         dtype="uint64",
         fill_value=0,
-        config={"write_empty_chunks": False},
     )
-    color_max: zarr.Array | None = None
-    if has_color:
-        color_max = level_group.create_array(
-            name="color_max",
-            shape=shape,
-            chunks=(tile_size, tile_size),
-            dtype="float64",
-            fill_value=np.nan,
-            config={"write_empty_chunks": False},
-        )
-    return count, color_max
+    aggregate_group = level_group.create_group("aggregates")
+    for request in aggregates:
+        request_group = aggregate_group.create_group(request.key)
+        if request.reducer in {"sum", "mean"}:
+            _create_numeric_array(
+                request_group,
+                "sum",
+                shape=shape,
+                tile_size=tile_size,
+                dtype="float64",
+                fill_value=0.0,
+            )
+        if request.reducer == "mean":
+            _create_numeric_array(
+                request_group,
+                "count",
+                shape=shape,
+                tile_size=tile_size,
+                dtype="uint64",
+                fill_value=0,
+            )
+        if request.reducer in {"min", "max"}:
+            _create_numeric_array(
+                request_group,
+                "value",
+                shape=shape,
+                tile_size=tile_size,
+                dtype="float64",
+                fill_value=np.nan,
+            )
+    return count
 
 
 def _chunk_slices(
@@ -116,20 +154,58 @@ def _chunk_slices(
     )
 
 
+def _update_aggregate_chunk(
+    root: zarr.Group,
+    *,
+    request: AggregateRequest,
+    level: int,
+    ys: slice,
+    xs: slice,
+    local_y: np.ndarray,
+    local_x: np.ndarray,
+    values: np.ndarray,
+) -> None:
+    prefix = f"levels/{level}/aggregates/{request.key}"
+    if request.reducer in {"sum", "mean"}:
+        sums_array = _array(root, f"{prefix}/sum")
+        sums = np.asarray(sums_array[ys, xs], dtype=np.float64)
+        np.add.at(sums, (local_y, local_x), values)
+        sums_array[ys, xs] = sums
+    if request.reducer == "mean":
+        n_array = _array(root, f"{prefix}/count")
+        n = np.asarray(n_array[ys, xs], dtype=np.uint64)
+        np.add.at(n, (local_y, local_x), 1)
+        n_array[ys, xs] = n
+    elif request.reducer in {"min", "max"}:
+        value_array = _array(root, f"{prefix}/value")
+        current = np.asarray(value_array[ys, xs], dtype=np.float64)
+        if request.reducer == "min":
+            work = np.where(np.isnan(current), np.inf, current)
+            np.minimum.at(work, (local_y, local_x), values)
+        else:
+            work = np.where(np.isnan(current), -np.inf, current)
+            np.maximum.at(work, (local_y, local_x), values)
+        value_array[ys, xs] = work
+
+
 def _build_base_level(
     *,
+    root: zarr.Group,
     count_array: zarr.Array,
-    color_array: zarr.Array | None,
     point_files: list[Path],
     min_x: int,
     min_y: int,
     base_cell_size: int,
     tile_size: int,
     batch_size: int,
+    aggregates: tuple[AggregateRequest, ...],
     occupied: _OccupiedChunks,
 ) -> None:
+    storage_columns = list(dict.fromkeys(request.storage for request in aggregates))
+    columns = ["x", "y", *storage_columns]
+    storage_index = {name: index + 2 for index, name in enumerate(storage_columns)}
+
     for point_file in point_files:
-        columns = ["x", "y"] + (["color"] if color_array is not None else [])
         parquet = pq.ParquetFile(point_file)
         for batch in parquet.iter_batches(batch_size=batch_size, columns=columns):
             x = np.asarray(batch.column(0), dtype=np.int64)
@@ -146,11 +222,12 @@ def _build_base_level(
             chunk_y = chunk_y[order]
             local_x = local_x[order]
             local_y = local_y[order]
-            color = (
-                np.asarray(batch.column(2), dtype=np.float64)[order]
-                if color_array is not None
-                else None
-            )
+            aggregate_values = {
+                request.key: np.asarray(
+                    batch.column(storage_index[request.storage]), dtype=np.float64
+                )[order]
+                for request in aggregates
+            }
 
             if len(order) == 0:
                 continue
@@ -173,12 +250,17 @@ def _build_base_level(
                 np.add.at(counts, (ly, lx), 1)
                 count_array[ys, xs] = counts
 
-                if color_array is not None and color is not None:
-                    colors = np.asarray(color_array[ys, xs], dtype=np.float64)
-                    work = np.where(np.isnan(colors), -np.inf, colors)
-                    np.maximum.at(work, (ly, lx), color[start:stop])
-                    work[counts == 0] = np.nan
-                    color_array[ys, xs] = work
+                for request in aggregates:
+                    _update_aggregate_chunk(
+                        root,
+                        request=request,
+                        level=0,
+                        ys=ys,
+                        xs=xs,
+                        local_y=ly,
+                        local_x=lx,
+                        values=aggregate_values[request.key][start:stop],
+                    )
 
                 occupied.add(0, cy, cx)
         occupied.commit()
@@ -186,33 +268,97 @@ def _build_base_level(
 
 def _downsample_sum(values: np.ndarray) -> np.ndarray:
     height, width = values.shape
-    padded = np.zeros((height + height % 2, width + width % 2), dtype=np.uint64)
+    padded = np.zeros((height + height % 2, width + width % 2), dtype=values.dtype)
     padded[:height, :width] = values
     return padded.reshape(padded.shape[0] // 2, 2, padded.shape[1] // 2, 2).sum(
-        axis=(1, 3), dtype=np.uint64
+        axis=(1, 3), dtype=values.dtype
     )
 
 
-def _downsample_max(values: np.ndarray) -> np.ndarray:
+def _downsample_extreme(values: np.ndarray, *, reducer: str) -> np.ndarray:
     height, width = values.shape
-    padded = np.full(
-        (height + height % 2, width + width % 2), -np.inf, dtype=np.float64
+    fill = np.inf if reducer == "min" else -np.inf
+    padded = np.full((height + height % 2, width + width % 2), fill, dtype=np.float64)
+    padded[:height, :width] = np.where(np.isnan(values), fill, values)
+    reshaped = padded.reshape(padded.shape[0] // 2, 2, padded.shape[1] // 2, 2)
+    result = (
+        reshaped.min(axis=(1, 3)) if reducer == "min" else reshaped.max(axis=(1, 3))
     )
-    padded[:height, :width] = np.where(np.isnan(values), -np.inf, values)
-    return padded.reshape(padded.shape[0] // 2, 2, padded.shape[1] // 2, 2).max(
-        axis=(1, 3)
-    )
+    result[~np.isfinite(result)] = np.nan
+    return result
+
+
+def _merge_parent_state(
+    root: zarr.Group,
+    *,
+    request: AggregateRequest,
+    child_level: int,
+    parent_level: int,
+    child_ys: slice,
+    child_xs: slice,
+    target_ys: slice,
+    target_xs: slice,
+    source_height: int,
+    source_width: int,
+) -> None:
+    child_prefix = f"levels/{child_level}/aggregates/{request.key}"
+    parent_prefix = f"levels/{parent_level}/aggregates/{request.key}"
+    if request.reducer in {"sum", "mean"}:
+        child = np.asarray(
+            _array(root, f"{child_prefix}/sum")[child_ys, child_xs],
+            dtype=np.float64,
+        )
+        reduced = _downsample_sum(child)
+        parent_array = _array(root, f"{parent_prefix}/sum")
+        target = np.asarray(parent_array[target_ys, target_xs], dtype=np.float64)
+        target[:source_height, :source_width] += reduced[:source_height, :source_width]
+        parent_array[target_ys, target_xs] = target
+    if request.reducer == "mean":
+        child_n = np.asarray(
+            _array(root, f"{child_prefix}/count")[child_ys, child_xs],
+            dtype=np.uint64,
+        )
+        reduced_n = _downsample_sum(child_n)
+        parent_n_array = _array(root, f"{parent_prefix}/count")
+        target_n = np.asarray(parent_n_array[target_ys, target_xs], dtype=np.uint64)
+        target_n[:source_height, :source_width] += reduced_n[
+            :source_height, :source_width
+        ]
+        parent_n_array[target_ys, target_xs] = target_n
+    elif request.reducer in {"min", "max"}:
+        child_values = np.asarray(
+            _array(root, f"{child_prefix}/value")[child_ys, child_xs],
+            dtype=np.float64,
+        )
+        reduced_values = _downsample_extreme(child_values, reducer=request.reducer)
+        parent_array = _array(root, f"{parent_prefix}/value")
+        target = np.asarray(parent_array[target_ys, target_xs], dtype=np.float64)
+        source = reduced_values[:source_height, :source_width]
+        target_slice = target[:source_height, :source_width]
+        if request.reducer == "min":
+            merged = np.minimum(
+                np.where(np.isnan(target_slice), np.inf, target_slice),
+                np.where(np.isnan(source), np.inf, source),
+            )
+        else:
+            merged = np.maximum(
+                np.where(np.isnan(target_slice), -np.inf, target_slice),
+                np.where(np.isnan(source), -np.inf, source),
+            )
+        merged[~np.isfinite(merged)] = np.nan
+        target[:source_height, :source_width] = merged
+        parent_array[target_ys, target_xs] = target
 
 
 def _build_parent_level(
     *,
+    root: zarr.Group,
     child_count: zarr.Array,
-    child_color: zarr.Array | None,
     parent_count: zarr.Array,
-    parent_color: zarr.Array | None,
     child_level: int,
     parent_level: int,
     tile_size: int,
+    aggregates: tuple[AggregateRequest, ...],
     occupied: _OccupiedChunks,
 ) -> None:
     half_tile = tile_size // 2
@@ -230,11 +376,6 @@ def _build_parent_level(
             parent_xs.stop - parent_xs.start,
         )
         counts = np.zeros(output_shape, dtype=np.uint64)
-        colors = (
-            np.full(output_shape, -np.inf, dtype=np.float64)
-            if parent_color is not None
-            else None
-        )
 
         for child_chunk_y, child_chunk_x in children:
             child_ys, child_xs = _chunk_slices(
@@ -246,26 +387,27 @@ def _build_parent_level(
             offset_x = (child_chunk_x % 2) * half_tile
             end_y = min(output_shape[0], offset_y + reduced_counts.shape[0])
             end_x = min(output_shape[1], offset_x + reduced_counts.shape[1])
-            counts[offset_y:end_y, offset_x:end_x] += reduced_counts[
-                : end_y - offset_y, : end_x - offset_x
-            ]
+            height = end_y - offset_y
+            width = end_x - offset_x
+            counts[offset_y:end_y, offset_x:end_x] += reduced_counts[:height, :width]
 
-            if child_color is not None and colors is not None:
-                child_colors = np.asarray(
-                    child_color[child_ys, child_xs], dtype=np.float64
-                )
-                reduced_colors = _downsample_max(child_colors)
-                target = colors[offset_y:end_y, offset_x:end_x]
-                np.maximum(
-                    target,
-                    reduced_colors[: end_y - offset_y, : end_x - offset_x],
-                    out=target,
+            target_ys = slice(parent_ys.start + offset_y, parent_ys.start + end_y)
+            target_xs = slice(parent_xs.start + offset_x, parent_xs.start + end_x)
+            for request in aggregates:
+                _merge_parent_state(
+                    root,
+                    request=request,
+                    child_level=child_level,
+                    parent_level=parent_level,
+                    child_ys=child_ys,
+                    child_xs=child_xs,
+                    target_ys=target_ys,
+                    target_xs=target_xs,
+                    source_height=height,
+                    source_width=width,
                 )
 
         parent_count[parent_ys, parent_xs] = counts
-        if parent_color is not None and colors is not None:
-            colors[counts == 0] = np.nan
-            parent_color[parent_ys, parent_xs] = colors
         occupied.add(parent_level, parent_chunk_y, parent_chunk_x)
     occupied.commit()
 
@@ -282,10 +424,10 @@ def build_lod_pyramid(
     tile_size: int,
     base_cell_size: int,
     batch_size: int,
-    has_color: bool,
+    aggregates: tuple[AggregateRequest, ...] = (),
     progress: Progress | None = None,
 ) -> tuple[LevelManifest, ...]:
-    """Build sparse numerical LOD arrays without creating raster image tiles."""
+    """Build sparse numerical LOD arrays from mergeable aggregate states."""
 
     report = progress or (lambda _message: None)
     lod_path = dataset_path / "lod.zarr"
@@ -311,22 +453,23 @@ def build_lod_pyramid(
             f"building LOD 0: {base_shape[1]} × {base_shape[0]} logical cells "
             f"at {base_cell_size} units/cell"
         )
-        count, color = _create_level_arrays(
+        count = _create_level_arrays(
             root,
             level=0,
             shape=base_shape,
             tile_size=tile_size,
-            has_color=has_color,
+            aggregates=aggregates,
         )
         _build_base_level(
+            root=root,
             count_array=count,
-            color_array=color,
             point_files=point_files,
             min_x=min_x,
             min_y=min_y,
             base_cell_size=base_cell_size,
             tile_size=tile_size,
             batch_size=batch_size,
+            aggregates=aggregates,
             occupied=occupied,
         )
         levels.append(
@@ -348,25 +491,22 @@ def build_lod_pyramid(
                 f"building LOD {parent_level}: {parent_shape[1]} × "
                 f"{parent_shape[0]} logical cells"
             )
-            parent_count, parent_color = _create_level_arrays(
+            parent_count = _create_level_arrays(
                 root,
                 level=parent_level,
                 shape=parent_shape,
                 tile_size=tile_size,
-                has_color=has_color,
+                aggregates=aggregates,
             )
             child_count = _array(root, f"levels/{level}/count")
-            child_color = (
-                _array(root, f"levels/{level}/color_max") if has_color else None
-            )
             _build_parent_level(
+                root=root,
                 child_count=child_count,
-                child_color=child_color,
                 parent_count=parent_count,
-                parent_color=parent_color,
                 child_level=level,
                 parent_level=parent_level,
                 tile_size=tile_size,
+                aggregates=aggregates,
                 occupied=occupied,
             )
             levels.append(

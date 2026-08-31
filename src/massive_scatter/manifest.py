@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+from .spec import AggregateRequest, PlotManifest
+
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 MAX_SAFE_VIEWER_EXTENT = 2**53 - 1
 
 
 @dataclass(frozen=True, slots=True)
 class LevelManifest:
-    """Metadata for one numerical level-of-detail array."""
-
     level: int
     cell_size: int
     height: int
@@ -41,12 +42,7 @@ class LevelManifest:
 
 @dataclass(frozen=True, slots=True)
 class Manifest:
-    """Portable description of a ``.msplot`` dataset.
-
-    Absolute coordinates are serialized as decimal strings so JavaScript never
-    rounds an int64 origin. The viewer works in exact offsets from ``min_x`` and
-    ``min_y``; those offsets are restricted to JavaScript's exact integer range.
-    """
+    """Portable description of a ``.msplot`` dataset."""
 
     point_count: int
     min_x: int
@@ -57,6 +53,9 @@ class Manifest:
     base_cell_size: int
     color_field: str | None
     levels: tuple[LevelManifest, ...]
+    exact_fields: dict[str, str] = field(default_factory=dict)
+    aggregates: tuple[AggregateRequest, ...] = ()
+    plot: PlotManifest | None = None
     schema_version: int = SCHEMA_VERSION
 
     @property
@@ -72,10 +71,13 @@ class Manifest:
         return self.levels[-1].level
 
     def validate(self) -> None:
-        if self.schema_version != SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            supported = ", ".join(
+                str(value) for value in sorted(SUPPORTED_SCHEMA_VERSIONS)
+            )
             raise ValueError(
                 f"Unsupported manifest schema {self.schema_version}; "
-                f"expected {SCHEMA_VERSION}."
+                f"supported versions are {supported}."
             )
         if self.point_count <= 0:
             raise ValueError("A plot must contain at least one point.")
@@ -84,7 +86,7 @@ class Manifest:
         if self.width > MAX_SAFE_VIEWER_EXTENT or self.height > MAX_SAFE_VIEWER_EXTENT:
             raise ValueError(
                 "The coordinate span exceeds 2^53-1. Absolute int64 origins are "
-                "supported, but the MVP viewer requires each axis span to fit in "
+                "supported, but the viewer requires each axis span to fit in "
                 "JavaScript's exact integer range."
             )
         if self.tile_size < 2 or self.tile_size & (self.tile_size - 1):
@@ -109,9 +111,26 @@ class Manifest:
                     raise ValueError("LOD widths do not form a factor-two pyramid.")
             previous = level
 
+        keys = [request.key for request in self.aggregates]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Aggregate request keys must be unique.")
+        for request in self.aggregates:
+            if request.source not in self.exact_fields:
+                raise ValueError(
+                    f"Aggregate {request.key!r} refers to unknown exact field "
+                    f"{request.source!r}."
+                )
+            if self.exact_fields[request.source] != request.storage:
+                raise ValueError(
+                    f"Aggregate {request.key!r} storage disagrees with exact "
+                    "field mapping."
+                )
+        if self.plot is not None and self.plot.exact_fields != self.exact_fields:
+            raise ValueError("Plot and manifest exact-field mappings disagree.")
+
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
+        result: dict[str, Any] = {
             "schema_version": self.schema_version,
             "point_count": self.point_count,
             "coordinate_dtype": "int64",
@@ -128,6 +147,13 @@ class Manifest:
             "color_field": self.color_field,
             "levels": [level.to_dict() for level in self.levels],
         }
+        if self.exact_fields:
+            result["exact_fields"] = dict(self.exact_fields)
+        if self.aggregates:
+            result["aggregates"] = [request.to_dict() for request in self.aggregates]
+        if self.plot is not None:
+            result["plot"] = self.plot.to_dict()
+        return result
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> Manifest:
@@ -143,6 +169,18 @@ class Manifest:
             base_cell_size=int(value["base_cell_size"]),
             color_field=value.get("color_field"),
             levels=tuple(LevelManifest.from_dict(item) for item in value["levels"]),
+            exact_fields={
+                str(source): str(storage)
+                for source, storage in value.get("exact_fields", {}).items()
+            },
+            aggregates=tuple(
+                AggregateRequest.from_dict(item) for item in value.get("aggregates", [])
+            ),
+            plot=(
+                PlotManifest.from_dict(value["plot"])
+                if value.get("plot") is not None
+                else None
+            ),
         )
         manifest.validate()
         return manifest
