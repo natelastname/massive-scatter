@@ -13,8 +13,10 @@ import pyarrow.parquet as pq
 
 from .lod import build_lod_pyramid
 from .manifest import MAX_SAFE_VIEWER_EXTENT, Manifest
+from .spec import AggregateRequest, CompiledPlot, PlotManifest
 
 Progress = Callable[[str], None]
+MAX_CATEGORIES = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +48,8 @@ class _IngestResult:
     min_y: int
     max_y: int
     point_files: tuple[Path, ...]
+    numeric_ranges: dict[str, tuple[float, float]]
+    categorical_fields: dict[str, tuple[str, ...]]
 
 
 def _canonical_table(
@@ -53,12 +57,13 @@ def _canonical_table(
     *,
     x_field: str,
     y_field: str,
-    color_field: str | None,
+    exact_fields: dict[str, str],
+    field_kinds: dict[str, str],
 ) -> pa.Table:
     table = (
         pa.Table.from_batches([value]) if isinstance(value, pa.RecordBatch) else value
     )
-    required = [x_field, y_field] + ([color_field] if color_field else [])
+    required = list(dict.fromkeys([x_field, y_field, *exact_fields]))
     missing = [name for name in required if name not in table.column_names]
     if missing:
         raise ValueError(f"Input batch is missing columns: {', '.join(missing)}")
@@ -70,25 +75,42 @@ def _canonical_table(
     if x.null_count or y.null_count:
         raise ValueError("x and y columns may not contain null values.")
 
-    x = pc.cast(x, pa.int64(), safe=True)
-    y = pc.cast(y, pa.int64(), safe=True)
-    columns: dict[str, pa.Array | pa.ChunkedArray] = {"x": x, "y": y}
-
-    if color_field is not None:
-        color = table[color_field]
-        if not (
-            pa.types.is_integer(color.type)
-            or pa.types.is_floating(color.type)
-            or pa.types.is_decimal(color.type)
-        ):
-            raise TypeError("The color column must be numeric.")
-        if color.null_count:
-            raise ValueError("The color column may not contain null values.")
-        color = pc.cast(color, pa.float64(), safe=True)
-        color_values = np.asarray(color.combine_chunks(), dtype=np.float64)
-        if not np.isfinite(color_values).all():
-            raise ValueError("The color column may not contain NaN or infinite values.")
-        columns["color"] = color
+    columns: dict[str, pa.Array | pa.ChunkedArray] = {
+        "x": pc.cast(x, pa.int64(), safe=True),
+        "y": pc.cast(y, pa.int64(), safe=True),
+    }
+    for source, storage in exact_fields.items():
+        field = table[source]
+        if field.null_count:
+            raise ValueError(f"Field {source!r} may not contain null values.")
+        kind = field_kinds[source]
+        if kind == "numeric":
+            if not (
+                pa.types.is_integer(field.type)
+                or pa.types.is_floating(field.type)
+                or pa.types.is_decimal(field.type)
+            ):
+                raise TypeError(f"Field {source!r} must be numeric.")
+            field = pc.cast(field, pa.float64(), safe=True)
+            values = np.asarray(field.combine_chunks(), dtype=np.float64)
+            if not np.isfinite(values).all():
+                raise ValueError(f"Field {source!r} may not contain NaN or infinity.")
+        elif kind == "categorical":
+            if not (
+                pa.types.is_string(field.type)
+                or pa.types.is_large_string(field.type)
+                or pa.types.is_integer(field.type)
+                or pa.types.is_floating(field.type)
+                or pa.types.is_boolean(field.type)
+                or pa.types.is_dictionary(field.type)
+            ):
+                raise TypeError(
+                    f"Categorical field {source!r} must contain scalar strings, numbers, or booleans."
+                )
+            field = pc.cast(field, pa.string(), safe=False)
+        else:
+            raise ValueError(f"Unknown field kind {kind!r} for {source!r}.")
+        columns[storage] = field
 
     return pa.table(columns)
 
@@ -99,7 +121,8 @@ def _write_point_parts(
     *,
     x_field: str,
     y_field: str,
-    color_field: str | None,
+    exact_fields: dict[str, str],
+    field_kinds: dict[str, str],
     part_rows: int,
     progress: Progress,
 ) -> _IngestResult:
@@ -116,6 +139,32 @@ def _write_point_parts(
     max_y: int | None = None
     point_files: list[Path] = []
     index_rows: list[dict[str, int | str]] = []
+    numeric_ranges: dict[str, tuple[float, float]] = {}
+    category_values: dict[str, dict[str, None]] = {
+        source: {} for source, kind in field_kinds.items() if kind == "categorical"
+    }
+
+    def update_field_metadata(table: pa.Table) -> None:
+        for source, storage in exact_fields.items():
+            kind = field_kinds[source]
+            column = table[storage].combine_chunks()
+            if kind == "numeric":
+                values = np.asarray(column, dtype=np.float64)
+                current = (float(values.min()), float(values.max()))
+                previous = numeric_ranges.get(source)
+                numeric_ranges[source] = (
+                    current[0] if previous is None else min(previous[0], current[0]),
+                    current[1] if previous is None else max(previous[1], current[1]),
+                )
+            else:
+                values = category_values[source]
+                for item in pc.unique(column).to_pylist():
+                    values[str(item)] = None
+                    if len(values) > MAX_CATEGORIES:
+                        raise ValueError(
+                            f"Categorical field {source!r} has more than {MAX_CATEGORIES} "
+                            "values; high-cardinality categorical summaries are not supported yet."
+                        )
 
     def flush() -> None:
         nonlocal pending, pending_rows, part_index, point_count
@@ -124,12 +173,13 @@ def _write_point_parts(
             return
 
         table = pa.concat_tables(pending).combine_chunks()
+        update_field_metadata(table)
         path = points_path / f"part-{part_index:06d}.parquet"
         pq.write_table(
             table,
             path,
             compression="zstd",
-            use_dictionary=False,
+            use_dictionary=True,
             write_statistics=True,
             row_group_size=min(part_rows, 131_072),
         )
@@ -168,7 +218,8 @@ def _write_point_parts(
             value,
             x_field=x_field,
             y_field=y_field,
-            color_field=color_field,
+            exact_fields=exact_fields,
+            field_kinds=field_kinds,
         )
         if table.num_rows == 0:
             continue
@@ -202,6 +253,22 @@ def _write_point_parts(
         min_y=min_y,
         max_y=max_y,
         point_files=tuple(point_files),
+        numeric_ranges=numeric_ranges,
+        categorical_fields={
+            source: tuple(values) for source, values in category_values.items()
+        },
+    )
+
+
+def _legacy_contract(color: str | None) -> tuple[
+    dict[str, str], dict[str, str], tuple[AggregateRequest, ...]
+]:
+    if color is None:
+        return {}, {}, ()
+    return (
+        {color: "color"},
+        {color: "numeric"},
+        (AggregateRequest("legacy_color", color, "color", "max"),),
     )
 
 
@@ -214,14 +281,17 @@ def build_dataset(
     color: str | None = None,
     config: BuildConfig | None = None,
     progress: Progress | None = None,
+    plot: CompiledPlot | None = None,
 ) -> Manifest:
-    """Build an exact-point store and sparse aggregate pyramid.
+    """Build an exact-point store and sparse mergeable LOD pyramid.
 
-    Input is consumed as Arrow batches. Memory use is bounded by the caller's
-    batch size, one Parquet output part, and a small number of numerical Zarr
-    chunks; it is independent of the full point count and rectangular extent.
+    ``plot`` is the compiled contract used by the higher-level Matplotlib-like
+    API. The historical x/y/color arguments remain supported and are compiled
+    to the same generic max-reducer machinery for backwards compatibility.
     """
 
+    if plot is not None and color is not None:
+        raise ValueError("color= and plot= may not be combined")
     settings = config or BuildConfig()
     settings.validate()
     report = progress or (lambda _message: None)
@@ -232,6 +302,15 @@ def build_dataset(
             f"{output_path} already exists; pass overwrite=True to replace it."
         )
 
+    if plot is None:
+        exact_fields, field_kinds, aggregates = _legacy_contract(color)
+    else:
+        if plot.x != x or plot.y != y:
+            raise ValueError("Compiled plot x/y fields disagree with build_dataset x/y.")
+        exact_fields = plot.exact_fields
+        field_kinds = dict(plot.field_kinds)
+        aggregates = plot.aggregates
+
     temporary_path = output_path.parent / f".{output_path.name}.tmp-{uuid.uuid4().hex}"
     temporary_path.mkdir()
     try:
@@ -241,7 +320,8 @@ def build_dataset(
             batches,
             x_field=x,
             y_field=y,
-            color_field=color,
+            exact_fields=exact_fields,
+            field_kinds=field_kinds,
             part_rows=settings.part_rows,
             progress=report,
         )
@@ -250,7 +330,7 @@ def build_dataset(
         height = ingest.max_y - ingest.min_y + 1
         if width > MAX_SAFE_VIEWER_EXTENT or height > MAX_SAFE_VIEWER_EXTENT:
             raise ValueError(
-                "The MVP preserves arbitrary int64 origins, but each axis span must "
+                "The viewer preserves arbitrary int64 origins, but each axis span must "
                 "be at most 2^53-1 so unit offsets remain exact in JavaScript."
             )
 
@@ -265,8 +345,19 @@ def build_dataset(
             tile_size=settings.tile_size,
             base_cell_size=settings.base_cell_size,
             batch_size=settings.batch_size,
-            has_color=color is not None,
+            aggregates=aggregates,
             progress=report,
+        )
+        plot_manifest = (
+            PlotManifest(
+                scatter=plot.scatter,
+                axes=plot.axes,
+                exact_fields=dict(plot.exact_fields),
+                categorical_fields=ingest.categorical_fields,
+                numeric_ranges=ingest.numeric_ranges,
+            )
+            if plot is not None
+            else None
         )
         manifest = Manifest(
             point_count=ingest.point_count,
@@ -278,6 +369,9 @@ def build_dataset(
             base_cell_size=settings.base_cell_size,
             color_field=color,
             levels=levels,
+            exact_fields=dict(exact_fields),
+            aggregates=aggregates,
+            plot=plot_manifest,
         )
         manifest.save(temporary_path)
 
