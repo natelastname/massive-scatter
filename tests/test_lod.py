@@ -15,7 +15,7 @@ def test_parent_levels_preserve_counts_and_max_color(tmp_path):
         output,
         [batch],
         color="weight",
-        config=BuildConfig(tile_size=4, base_cell_size=1, part_rows=4),
+        config=BuildConfig(base_cell_size=1, part_rows=4),
     )
 
     assert len(manifest.levels) >= 2
