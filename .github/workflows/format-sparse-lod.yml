@@ -1,0 +1,73 @@
+name: Format sparse LOD
+
+on:
+  push:
+    branches:
+      - feature/sparse-lod-20260830
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.event.head_commit.message != 'Format sparse LOD implementation [skip format]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-groups
+      - name: Format Python files
+        run: |
+          uv run ruff check --fix \
+            src/massive_scatter/builder.py \
+            src/massive_scatter/dataset.py \
+            src/massive_scatter/manifest.py \
+            src/massive_scatter/sparse_dataset.py \
+            src/massive_scatter/sparse_lod.py
+          uv run black \
+            src/massive_scatter/builder.py \
+            src/massive_scatter/dataset.py \
+            src/massive_scatter/manifest.py \
+            src/massive_scatter/sparse_dataset.py \
+            src/massive_scatter/sparse_lod.py
+      - name: Write formatted files through GitHub REST API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import base64, json, os, subprocess
+          from pathlib import Path
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          paths = [
+              'src/massive_scatter/builder.py',
+              'src/massive_scatter/dataset.py',
+              'src/massive_scatter/manifest.py',
+              'src/massive_scatter/sparse_dataset.py',
+              'src/massive_scatter/sparse_lod.py',
+          ]
+          token, repo, branch = os.environ['GH_TOKEN'], os.environ['REPO'], os.environ['BRANCH']
+          headers = {
+              'Authorization': f'Bearer {token}',
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+          def request(method, url, payload=None):
+              req = Request(url, data=None if payload is None else json.dumps(payload).encode(), headers=headers, method=method)
+              with urlopen(req) as response:
+                  return json.load(response)
+          for path in paths:
+              if subprocess.run(['git', 'diff', '--quiet', '--', path]).returncode == 0:
+                  continue
+              current = request('GET', f'https://api.github.com/repos/{repo}/contents/{quote(path)}?ref={quote(branch)}')
+              request('PUT', f'https://api.github.com/repos/{repo}/contents/{quote(path)}', {
+                  'message': 'Format sparse LOD implementation [skip format]',
+                  'content': base64.b64encode(Path(path).read_bytes()).decode(),
+                  'sha': current['sha'],
+                  'branch': branch,
+              })
+          PY
