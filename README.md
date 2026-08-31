@@ -96,9 +96,25 @@ uv run massive-scatter serve figure.msplot --port 8080
 
 ## Matplotlib-like plot grammar
 
-For richer figures, use the Python plotting surface. It copies familiar
-Matplotlib concepts while compiling them to a declarative, out-of-core plot
-specification:
+For richer figures, use the Python plotting API. It deliberately copies a small,
+familiar part of Matplotlib's grammar, but compiles the figure into a declarative
+out-of-core plot specification rather than keeping all plotted data in memory.
+
+The public plotting surface consists of:
+
+```python
+ms.subplots()
+ms.Figure
+ms.Axes
+ms.field(...)
+ms.sum(...)
+ms.mean(...)
+ms.min(...)
+ms.max(...)
+ms.count()
+```
+
+A representative figure is:
 
 ```python
 import massive_scatter as ms
@@ -113,12 +129,12 @@ ax.scatter(
     cmap="viridis",
     marker=ms.field("event_type"),
     s="importance",
-    alpha=0.9,
-    label="Enots-Wolley",
+    alpha=ms.count(),
+    label="EW",
 )
 
 ax.set(
-    title="Enots-Wolley sequence",
+    title="Enots-Wolley",
     xlabel="n",
     ylabel="a(n)",
 )
@@ -127,50 +143,187 @@ ax.legend()
 fig.write("ew.msplot")
 ```
 
-`source` may also be an iterable of Arrow `RecordBatch` or `Table` objects, so
-large generated data does not need to be materialized in Python memory.
-
-### Encodings
-
-The first grammar supports:
-
-```text
-x, y       source coordinate fields (integer)
-c           numeric field or mergeable reducer expression
-color       constant CSS color (mutually exclusive with c)
-cmap        viridis, plasma, or magma
-marker      constant marker or categorical field
-s           constant size or numeric exact-point field
-alpha       constant, count(), or numeric mergeable field
-label       legend label
-```
-
-Examples:
+### `subplots()`
 
 ```python
-# Constant styling.
-ax.scatter(source, x="x", y="y", color="#ff0080", marker="^", s=4)
-
-# Default mean reduction for a numeric color field.
-ax.scatter(source, x="x", y="y", c="score")
-
-# Explicit aggregate semantics.
-ax.scatter(source, x="x", y="y", c=ms.max("score"))
-ax.scatter(source, x="x", y="y", c=ms.mean("score"), alpha=ms.count())
+fig, ax = ms.subplots()
 ```
 
-Available reducer constructors are:
+Returns the single `Figure` / `Axes` pair supported by the first grammar
+version. Multiple subplots are not yet implemented.
+
+### `Axes.scatter(...)`
+
+The current signature is conceptually:
+
+```python
+ax.scatter(
+    source,
+    *,
+    x,
+    y,
+    c=None,
+    color=None,
+    cmap="viridis",
+    marker="o",
+    s=3.0,
+    alpha=0.92,
+    label=None,
+)
+```
+
+`source` may be either:
+
+- a file-backed source accepted by the normal input layer, such as Parquet or
+  CSV/TSV; or
+- an iterable of Arrow `RecordBatch` / `Table` objects.
+
+The iterable form lets generated or streamed data remain bounded-memory instead
+of first materializing the full dataset in Python.
+
+Only one massive scatter layer is currently supported per axes. Calling
+`scatter()` a second time raises `NotImplementedError` rather than silently
+inventing unsupported multi-layer semantics.
+
+`c=` and `color=` are mutually exclusive. `c=` means a data mapping; `color=`
+means a constant CSS color.
+
+### Scatter channels
+
+| argument | exact-point meaning | aggregate-LOD meaning |
+| --- | --- | --- |
+| `x` | integer source x coordinate | determines the spatial bin |
+| `y` | integer source y coordinate | determines the spatial bin |
+| `c` | numeric per-point field | finalized numeric reducer value |
+| `color` | constant CSS color | same constant color |
+| `cmap` | continuous color map | same map applied to aggregate value |
+| `marker` | constant marker or categorical field | deliberately discarded; aggregate geometry is the square bin |
+| `s` | constant or numeric per-point size | deliberately discarded; aggregate geometry is the square bin |
+| `alpha` | constant, numeric field, or `count()` | constant or finalized reducer/count |
+| `label` | layer/legend label | persisted in plot metadata |
+
+Supported continuous color maps are currently:
+
+```text
+viridis
+plasma
+magma
+```
+
+#### Color
+
+Use `c=` for numeric data-driven color:
+
+```python
+ax.scatter(source, x="x", y="y", c="score")
+ax.scatter(source, x="x", y="y", c=ms.max("score"))
+ax.scatter(source, x="x", y="y", c=ms.mean("score"))
+```
+
+A bare numeric field uses `mean` as its default aggregate reducer. An explicit
+reducer expression overrides that default.
+
+Use `color=` for a constant CSS color:
+
+```python
+ax.scatter(source, x="x", y="y", color="#ff0080")
+```
+
+If neither `c=` nor `color=` is supplied, the plot uses aggregate cell count as
+the color value.
+
+#### Marker
+
+A known marker string is interpreted as a constant marker:
+
+```python
+ax.scatter(source, x="x", y="y", marker="^")
+```
+
+Currently recognized constants include circles, squares, triangles, diamonds,
+`x`, and `+` forms (`"o"`, `"circle"`, `"s"`, `"square"`, `"^"`,
+`"triangle"`, `"D"`, `"diamond"`, `"x"`, `"+"`).
+
+A field reference is categorical and applies per exact point:
+
+```python
+ax.scatter(source, x="x", y="y", marker=ms.field("event_type"))
+```
+
+A non-marker string is also interpreted as a categorical source field. The
+current categorical domain is bounded to at most 32 global values. This keeps
+exact-point marker domains and generated legend entries bounded.
+
+Marker fields do **not** receive an aggregate reducer. Once multiple points have
+collapsed into one LOD cell, the visible object is the square spatial cell, not
+a fabricated representative marker.
+
+#### Size
+
+A numeric constant sets a fixed exact-point marker size:
+
+```python
+ax.scatter(source, x="x", y="y", s=4)
+```
+
+A string or `ms.field(...)` maps an exact numeric field to per-point size:
+
+```python
+ax.scatter(source, x="x", y="y", s="importance")
+```
+
+Like marker, size is intentionally exact-point-only. Aggregate cells keep their
+true square spatial geometry instead of deriving a synthetic marker size.
+
+#### Alpha
+
+Alpha may be a constant:
+
+```python
+ax.scatter(source, x="x", y="y", alpha=0.8)
+```
+
+or a numeric field:
+
+```python
+ax.scatter(source, x="x", y="y", alpha="confidence")
+```
+
+A bare numeric alpha field uses `mean` at aggregate LOD. It may also use an
+explicit reducer expression or the implicit cell population:
+
+```python
+ax.scatter(source, x="x", y="y", alpha=ms.max("confidence"))
+ax.scatter(source, x="x", y="y", alpha=ms.count())
+```
+
+### Field and reducer expressions
+
+`ms.field(...)` represents a source column, optionally with an explicit reducer:
+
+```python
+ms.field("score")
+ms.field("score", reduce="max")
+```
+
+Convenience reducer constructors are:
 
 ```python
 ms.sum("field")
 ms.mean("field")
 ms.min("field")
 ms.max("field")
-ms.count()          # implicit spatial-cell population
-ms.field("field")  # field reference; channel supplies its default reducer
+ms.count()
 ```
 
-### LOD contract
+`ms.count()` is not backed by a source column. It means the implicit number of
+exact points represented by an aggregate spatial cell.
+
+Reducer requests are deduplicated during compilation. If multiple visual
+channels request the same `(field, reducer)` pair, the LOD pyramid stores one
+mergeable reducer state and both channels reference it.
+
+### Mergeable LOD contract
 
 Every aggregate reducer stores mergeable sufficient state. Higher LOD levels
 are built solely by merging child state; raw points are not reopened.
@@ -183,43 +336,141 @@ are built solely by merging child state; raw points are not reopened.
 | `min(x)` | `min` | min | `min` |
 | `max(x)` | `max` | max | `max` |
 
-In particular, `mean` is never implemented as a mean of child means.
+In particular, `mean` is **not** implemented by averaging child means. Each cell
+persists `(sum, count)`, and a parent is formed by summing those sufficient
+statistics before finalizing `sum / count`. The test suite contains a regression
+test specifically for this weighted-parent-mean invariant.
 
-`x` and `y` are not reducers: they determine the spatial bin. At aggregate LOD
-the rendered object is that square bin.
+`x` and `y` are not reducers. They define the spatial bin itself.
 
-Marker and size fields are deliberately **exact-point-only**. Once points are
-aggregated, the viewer renders square spatial cells rather than inventing an
-arbitrary aggregate marker or size. Numeric color and alpha encodings use their
-finalized reducer values.
+### Exact mode versus aggregate mode
 
-Categorical exact-point fields currently support at most 32 global values. This
-keeps marker domains and generated legends bounded; high-cardinality categorical
-sketches are future work.
+At sufficiently high zoom, the viewer asks for exact points. In exact mode:
 
-### Current grammar scope
+- `x` and `y` identify each original point;
+- categorical marker fields are honored per sample;
+- numeric size fields are honored per sample;
+- numeric color fields are honored per sample;
+- numeric alpha fields are honored per sample;
+- tooltips can expose the exact source style fields.
 
-The current API intentionally supports one figure, one axes, and one massive
-scatter layer. Multiple subplots and multiple layers are not yet implemented.
-This is a scope boundary, not an attempt to emulate unsupported Matplotlib
-behavior.
+When the exact point result would exceed the viewport point budget, the server
+selects an aggregate LOD. In aggregate mode:
 
-Axes metadata currently includes:
+- the rendered object is the actual square spatial bin;
+- marker and marker-size mappings intentionally disappear;
+- numeric color and alpha use their finalized reducer values;
+- `count()` uses the number of exact points represented by the cell;
+- aggregate tooltips expose the finalized reducer values and cell count.
+
+This distinction is deliberate: the library does not invent an arbitrary
+"representative point" merely to preserve point styling after the points no
+longer exist individually at that LOD.
+
+### Titles, labels, and legends
+
+Axes metadata can be set using either dedicated methods:
 
 ```python
 ax.set_title("title")
 ax.set_xlabel("x")
 ax.set_ylabel("y")
+```
+
+or the combined form:
+
+```python
 ax.set(title="title", xlabel="x", ylabel="y")
+```
+
+Enable generated legend UI with:
+
+```python
 ax.legend()
 ```
 
-The viewer generates categorical marker keys and continuous color bars from the
-compiled manifest.
+The viewer generates legend content from the compiled manifest rather than from
+hand-authored entries:
+
+- categorical marker mappings produce marker/category keys;
+- continuous numeric color mappings produce color bars;
+- the scatter `label=` is persisted as layer metadata.
+
+### `Figure.write(...)`
+
+After defining the axes, compile and build the plot with:
+
+```python
+manifest = fig.write("figure.msplot")
+```
+
+The method also accepts the normal build configuration and progress callback:
+
+```python
+manifest = fig.write(
+    "figure.msplot",
+    config=ms.BuildConfig(base_cell_size=64),
+    progress=print,
+)
+```
+
+`Figure.write()` compiles the visual grammar into an explicit plot/aggregate
+contract, requests only the source columns required by the figure, streams exact
+points into partitioned Parquet, builds the sparse mergeable LOD pyramid, writes
+the plot metadata to the manifest, and returns the resulting `Manifest`.
+
+### Current API scope and limitations
+
+The first plot grammar intentionally supports:
+
+- one figure;
+- one axes;
+- one massive scatter layer;
+- numeric data-mapped color;
+- constant or categorical exact-point markers;
+- constant or numeric exact-point sizes;
+- numeric/constant/count alpha;
+- `viridis`, `plasma`, and `magma` continuous color maps;
+- categorical exact fields with at most 32 global values.
+
+Not yet implemented:
+
+- multiple subplots;
+- multiple scatter layers;
+- categorical color aggregation;
+- aggregate categorical markers;
+- aggregate marker-size semantics;
+- high-cardinality categorical sketches/histograms.
+
+These are explicit scope boundaries. In particular, aggregate marker and size are
+not approximated with arbitrary rules simply to mimic a Matplotlib call shape.
+
+## Compatibility and `.msplot` schema
+
+New generalized plot-grammar datasets are written as `.msplot` schema v2.
+
+The current reader remains backward-compatible with legacy schema-v1 datasets,
+including the former hard-coded `color_max` LOD layout. Existing `.msplot` files
+therefore do not need to be rebuilt merely to use the new reader.
+
+The lower-level historical API also remains supported:
+
+```python
+build_dataset(
+    output,
+    batches,
+    x="x",
+    y="y",
+    color="score",
+)
+```
+
+That legacy `color=` field is implemented through the same generalized reducer
+machinery and retains its historical aggregate `max` semantics.
 
 ## Direct Python builder
 
-The lower-level API still consumes an iterable of Arrow batches:
+The lower-level API consumes an iterable of Arrow batches:
 
 ```python
 import pyarrow as pa
@@ -310,6 +561,9 @@ cd viewer
 npm test
 npm run build
 ```
+
+The reducer tests explicitly verify that aggregate means merge `(sum, count)`
+rather than averaging child means.
 
 Likely future extensions include multiple layers, categorical aggregate
 histograms/top-k summaries, more visual scales, Arrow IPC or binary HTTP
