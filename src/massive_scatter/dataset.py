@@ -316,7 +316,9 @@ class MassiveScatterDataset:
                 legacy_color = aggregate_values[request.key]
             elif not self.manifest.aggregates:
                 # Pre-grammar dataset layout.
-                color_array = _array(self._legacy_lod(), f"levels/{level.level}/color_max")
+                color_array = _array(
+                    self._legacy_lod(), f"levels/{level.level}/color_max"
+                )
                 colors = np.asarray(color_array[y0:y1, x0:x1], dtype=np.float64)
                 legacy_color = colors[local_y, local_x].tolist()
 
