@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -58,9 +58,7 @@ def _create_cell_table(
         if request.reducer in {"min", "max"}:
             columns.append(f'"{request.key}_value" REAL NOT NULL')
     columns.append("PRIMARY KEY (cell_y, cell_x)")
-    connection.execute(
-        f'CREATE TABLE "{table}" ({", ".join(columns)}) WITHOUT ROWID'
-    )
+    connection.execute(f'CREATE TABLE "{table}" ({", ".join(columns)}) WITHOUT ROWID')
 
 
 def _upsert_assignments(aggregates: tuple[AggregateRequest, ...]) -> list[str]:
@@ -75,9 +73,7 @@ def _upsert_assignments(aggregates: tuple[AggregateRequest, ...]) -> list[str]:
         if request.reducer in {"min", "max"}:
             name = f"{request.key}_value"
             function = "MIN" if request.reducer == "min" else "MAX"
-            assignments.append(
-                f'"{name}" = {function}("{name}", excluded."{name}")'
-            )
+            assignments.append(f'"{name}" = {function}("{name}", excluded."{name}")')
     return assignments
 
 
@@ -135,8 +131,7 @@ def _batch_rows(
     cell_x = cell_x[order]
     cell_y = cell_y[order]
     boundaries = (
-        np.flatnonzero((cell_x[1:] != cell_x[:-1]) | (cell_y[1:] != cell_y[:-1]))
-        + 1
+        np.flatnonzero((cell_x[1:] != cell_x[:-1]) | (cell_y[1:] != cell_y[:-1])) + 1
     )
     starts = np.concatenate(([0], boundaries))
     stops = np.concatenate((boundaries, [len(order)]))
@@ -224,7 +219,9 @@ def _arrow_schema(aggregates: tuple[AggregateRequest, ...]) -> pa.Schema:
         if request.reducer == "mean":
             fields.append(pa.field(f"{request.key}_count", pa.uint64(), nullable=False))
         if request.reducer in {"min", "max"}:
-            fields.append(pa.field(f"{request.key}_value", pa.float64(), nullable=False))
+            fields.append(
+                pa.field(f"{request.key}_value", pa.float64(), nullable=False)
+            )
     return pa.schema(fields)
 
 
@@ -234,7 +231,10 @@ def _rows_to_table(
 ) -> pa.Table:
     schema = _arrow_schema(aggregates)
     columns = list(zip(*rows, strict=True))
-    arrays = [pa.array(values, type=field.type) for values, field in zip(columns, schema)]
+    arrays = [
+        pa.array(values, type=field.type)
+        for values, field in zip(columns, schema, strict=True)
+    ]
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
