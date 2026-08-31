@@ -10,7 +10,7 @@
       <div id="plot"></div>
       <svg id="axes" aria-hidden="true"></svg>
       <header class="panel title-panel">
-        <strong>massive-scatter</strong>
+        <strong id="figure-title">massive-scatter</strong>
         <span id="dataset-summary">loading manifest…</span>
       </header>
       <section class="panel controls-panel">
@@ -20,6 +20,7 @@
           <input id="max-points" type="number" min="1000" max="1000000" step="1000" value="200000" />
         </label>
       </section>
+      <aside id="legend" class="panel legend-panel" hidden></aside>
       <footer class="panel status-panel" id="status">loading…</footer>
     </main>
     <script type="module" src="/src/main.ts"></script>
