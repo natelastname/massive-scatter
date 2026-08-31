@@ -10,7 +10,7 @@ def test_api_serves_manifest_and_view(tmp_path):
     build_dataset(
         output,
         [pa.record_batch([[0, 1, 2], [2, 1, 0]], names=["x", "y"])],
-        config=BuildConfig(tile_size=4, base_cell_size=1, part_rows=4),
+        config=BuildConfig(base_cell_size=1, part_rows=4),
     )
     client = TestClient(create_app(output))
 

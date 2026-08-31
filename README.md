@@ -97,8 +97,8 @@ uv run massive-scatter build points.parquet figure.msplot \
   --color support-weight
 ```
 
-The x and y columns must be integer-valued. The legacy `--color` column is
-numeric and uses a `max` reducer at aggregate LOD.
+The x and y columns must be integer-valued. The direct `--color` column is numeric and uses a `max` reducer at aggregate
+LOD.
 
 Useful commands:
 
@@ -459,18 +459,14 @@ Not yet implemented:
 These are explicit scope boundaries. In particular, aggregate marker and size are
 not approximated with arbitrary rules simply to mimic a Matplotlib call shape.
 
-## Compatibility and `.msplot` schema
+## `.msplot` schema
 
-New datasets are written as `.msplot` schema v3 and use
-`lod_storage="sparse_parquet"`. Schema v3 stores one row per occupied LOD cell
-rather than a logically dense Zarr array split into sparse chunks.
+The only supported dataset format is schema v3 with
+`lod_storage="sparse_parquet"`. Each LOD stores one row per occupied cell. The
+reader intentionally rejects every other schema version or LOD storage type;
+rebuild source data instead of carrying format-conversion or compatibility code.
 
-The reader remains backward-compatible with schema-v1 and schema-v2 Zarr
-artifacts, including the former hard-coded `color_max` layout. Existing
-`.msplot` files therefore remain readable; rebuilding them is only necessary if
-you want the new sparse-Parquet storage behavior.
-
-The lower-level historical API also remains supported:
+The lower-level direct API is:
 
 ```python
 build_dataset(
@@ -482,8 +478,8 @@ build_dataset(
 )
 ```
 
-That legacy `color=` field is implemented through the same generalized reducer
-machinery and retains its historical aggregate `max` semantics.
+That `color=` field is implemented through the same generalized reducer machinery
+and uses aggregate `max` semantics.
 
 ## Direct Python builder
 
@@ -521,7 +517,6 @@ Important build controls:
 ```text
 --batch-size       Arrow/Parquet scan batch size (default 131072)
 --part-rows        target rows per exact-point Parquet part (default 1000000)
---tile-size        legacy Zarr chunk setting; schema-v3 sparse LOD does not use it
 --base-cell-size   first aggregate cell width/height in native units (default 64)
 --overwrite        replace an existing output dataset
 ```

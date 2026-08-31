@@ -23,15 +23,12 @@ MAX_CATEGORIES = 32
 class BuildConfig:
     """Bounded-memory build settings."""
 
-    tile_size: int = 256
     base_cell_size: int = 64
     part_rows: int = 1_000_000
     batch_size: int = 131_072
     overwrite: bool = False
 
     def validate(self) -> None:
-        if self.tile_size < 2 or self.tile_size & (self.tile_size - 1):
-            raise ValueError("tile_size must be a power of two greater than one.")
         if self.base_cell_size < 1 or self.base_cell_size & (self.base_cell_size - 1):
             raise ValueError("base_cell_size must be a positive power of two.")
         if self.part_rows < 1:
@@ -262,7 +259,7 @@ def _write_point_parts(
     )
 
 
-def _legacy_contract(
+def _direct_contract(
     color: str | None,
 ) -> tuple[dict[str, str], dict[str, str], tuple[AggregateRequest, ...]]:
     if color is None:
@@ -288,8 +285,8 @@ def build_dataset(
     """Build an exact-point store and sparse mergeable LOD pyramid.
 
     ``plot`` is the compiled contract used by the higher-level Matplotlib-like
-    API. The historical x/y/color arguments remain supported and are compiled
-    to the same generic max-reducer machinery for backwards compatibility.
+    API. The x/y/color arguments form the lower-level direct builder API and
+    compile to the same generic reducer machinery.
     """
 
     if plot is not None and color is not None:
@@ -305,7 +302,7 @@ def build_dataset(
         )
 
     if plot is None:
-        exact_fields, field_kinds, aggregates = _legacy_contract(color)
+        exact_fields, field_kinds, aggregates = _direct_contract(color)
     else:
         if plot.x != x or plot.y != y:
             raise ValueError(
@@ -369,14 +366,12 @@ def build_dataset(
             max_x=ingest.max_x,
             min_y=ingest.min_y,
             max_y=ingest.max_y,
-            tile_size=settings.tile_size,
             base_cell_size=settings.base_cell_size,
             color_field=color,
             levels=levels,
             exact_fields=dict(exact_fields),
             aggregates=aggregates,
             plot=plot_manifest,
-            lod_storage="sparse_parquet",
         )
         manifest.save(temporary_path)
 

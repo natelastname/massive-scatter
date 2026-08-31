@@ -35,7 +35,7 @@ def test_plot_api_compiles_fields_reducers_and_axes(tmp_path):
     output = tmp_path / "plot.msplot"
     manifest = fig.write(
         output,
-        config=ms.BuildConfig(tile_size=2, base_cell_size=1, part_rows=2),
+        config=ms.BuildConfig(base_cell_size=1, part_rows=2),
     )
 
     assert manifest.plot is not None
@@ -92,7 +92,7 @@ def test_constant_color_and_count_require_no_source_field(tmp_path):
     output = tmp_path / "constant.msplot"
     manifest = fig.write(
         output,
-        config=ms.BuildConfig(tile_size=2, base_cell_size=1),
+        config=ms.BuildConfig(base_cell_size=1),
     )
     assert manifest.plot is not None
     assert manifest.plot.scatter.color.value == "#ff0080"
