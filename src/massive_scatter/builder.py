@@ -11,8 +11,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from .lod import build_lod_pyramid
 from .manifest import MAX_SAFE_VIEWER_EXTENT, Manifest
+from .sparse_lod import build_sparse_lod_pyramid
 from .spec import AggregateRequest, CompiledPlot, PlotManifest
 
 Progress = Callable[[str], None]
@@ -338,7 +338,7 @@ def build_dataset(
                 "be at most 2^53-1 so unit offsets remain exact in JavaScript."
             )
 
-        levels = build_lod_pyramid(
+        levels = build_sparse_lod_pyramid(
             temporary_path,
             point_files=list(ingest.point_files),
             point_count=ingest.point_count,
@@ -346,9 +346,9 @@ def build_dataset(
             max_x=ingest.max_x,
             min_y=ingest.min_y,
             max_y=ingest.max_y,
-            tile_size=settings.tile_size,
             base_cell_size=settings.base_cell_size,
             batch_size=settings.batch_size,
+            part_rows=settings.part_rows,
             aggregates=aggregates,
             progress=report,
         )
@@ -376,6 +376,7 @@ def build_dataset(
             exact_fields=dict(exact_fields),
             aggregates=aggregates,
             plot=plot_manifest,
+            lod_storage="sparse_parquet",
         )
         manifest.save(temporary_path)
 
