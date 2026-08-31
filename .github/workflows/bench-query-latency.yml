@@ -1,0 +1,76 @@
+name: Benchmark query latency
+
+on:
+  push:
+    branches:
+      - fix/sparse-query-latency-20260831
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-groups
+      - name: Benchmark sparse aggregate queries
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from time import perf_counter
+          import statistics
+          import numpy as np
+          import pyarrow as pa
+          from massive_scatter import BuildConfig, MassiveScatterDataset, build_dataset
+
+          n = 2_000_000
+          x = np.arange(n, dtype=np.int64)
+          slopes_num = np.array([990, 1097, 1250, 1750, 6300], dtype=np.int64)
+          bucket = x % len(slopes_num)
+          y = (x * slopes_num[bucket]) // 1000
+          batches = [pa.record_batch([x, y], names=['x', 'y'])]
+
+          with TemporaryDirectory() as raw:
+              output = Path(raw) / 'bench.msplot'
+              t0 = perf_counter()
+              build_dataset(
+                  output,
+                  batches,
+                  config=BuildConfig(base_cell_size=64, part_rows=1_000_000),
+              )
+              print(f'BUILD {perf_counter()-t0:.3f}s')
+              ds = MassiveScatterDataset(output)
+              rng = np.random.default_rng(20260831)
+              timings = []
+              for i in range(80):
+                  width = int(rng.integers(80_000, 500_000))
+                  xmin = int(rng.integers(0, n - width))
+                  xmax = xmin + width
+                  ymin = max(0, int(xmin * 0.8))
+                  ymax = int(xmax * 2.0)
+                  start = perf_counter()
+                  response = ds.view(
+                      min_x=xmin,
+                      max_x=xmax,
+                      min_y=ymin,
+                      max_y=ymax,
+                      pixel_width=1200,
+                      pixel_height=800,
+                      max_points=10_000,
+                      max_cells=200_000,
+                  )
+                  elapsed = (perf_counter() - start) * 1000
+                  timings.append(elapsed)
+                  if i < 5:
+                      print(
+                          'SAMPLE', i, f'{elapsed:.2f}ms', response['mode'],
+                          response.get('level'), response.get('cell_count')
+                      )
+              ordered = sorted(timings)
+              print(
+                  f'LATENCY median={statistics.median(timings):.2f}ms '
+                  f'p90={ordered[int(.9*len(ordered))-1]:.2f}ms '
+                  f'p99={ordered[int(.99*len(ordered))-1]:.2f}ms '
+                  f'max={max(timings):.2f}ms'
+              )
+          PY
