@@ -1,0 +1,37 @@
+name: Update floating v1 tag
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  update-v1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Point v1 at the latest master commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          auth=(
+            -H "Accept: application/vnd.github+json"
+            -H "Authorization: Bearer ${GH_TOKEN}"
+            -H "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          if curl -fsS "${auth[@]}" "${api}/git/ref/tags/v1" >/dev/null; then
+            curl -fsS -X PATCH "${auth[@]}" \
+              "${api}/git/refs/tags/v1" \
+              -d "{\"sha\":\"${GITHUB_SHA}\",\"force\":true}"
+          else
+            curl -fsS -X POST "${auth[@]}" \
+              "${api}/git/refs" \
+              -d "{\"ref\":\"refs/tags/v1\",\"sha\":\"${GITHUB_SHA}\"}"
+          fi
