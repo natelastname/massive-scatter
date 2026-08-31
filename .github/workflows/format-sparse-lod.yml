@@ -18,13 +18,13 @@ jobs:
       - run: uv sync --locked --all-groups
       - name: Format Python files
         run: |
-          uv run ruff check --fix \
+          uv run black \
             src/massive_scatter/builder.py \
             src/massive_scatter/dataset.py \
             src/massive_scatter/manifest.py \
             src/massive_scatter/sparse_dataset.py \
             src/massive_scatter/sparse_lod.py
-          uv run black \
+          uv run ruff check --fix \
             src/massive_scatter/builder.py \
             src/massive_scatter/dataset.py \
             src/massive_scatter/manifest.py \
