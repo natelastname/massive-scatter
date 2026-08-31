@@ -209,8 +209,7 @@ class PlotManifest:
             scatter=ScatterManifest.from_dict(value["scatter"]),
             axes=AxesManifest.from_dict(value.get("axes", {})),
             exact_fields={
-                str(k): str(v)
-                for k, v in value.get("exact_fields", {}).items()
+                str(k): str(v) for k, v in value.get("exact_fields", {}).items()
             },
             categorical_fields={
                 str(k): tuple(str(item) for item in items)
@@ -352,8 +351,7 @@ def compile_encodings(
     alpha_encoding = numeric_encoding(alpha, default_reducer="mean")
 
     exact_fields = {
-        source: f"field_{index:03d}"
-        for index, source in enumerate(exact_sources)
+        source: f"field_{index:03d}" for index, source in enumerate(exact_sources)
     }
     aggregates = tuple(
         AggregateRequest(
