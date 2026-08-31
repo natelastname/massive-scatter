@@ -18,6 +18,15 @@ jobs:
       - run: uv sync --locked --all-groups
       - name: Format Python files
         run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/massive_scatter/sparse_lod.py')
+          text = path.read_text().replace(
+              'zip(columns, schema)',
+              'zip(columns, schema, strict=True)',
+          )
+          path.write_text(text)
+          PY
           uv run black \
             src/massive_scatter/builder.py \
             src/massive_scatter/dataset.py \
