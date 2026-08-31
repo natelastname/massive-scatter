@@ -19,7 +19,6 @@ def test_build_exact_and_aggregate_views(tmp_path):
         [make_batch(origin)],
         color="weight",
         config=BuildConfig(
-            tile_size=8,
             base_cell_size=4,
             part_rows=128,
             batch_size=64,
@@ -74,7 +73,7 @@ def test_unit_separation_survives_origin_subtraction(tmp_path):
     build_dataset(
         output,
         [batch],
-        config=BuildConfig(tile_size=8, base_cell_size=1, part_rows=8),
+        config=BuildConfig(base_cell_size=1, part_rows=8),
     )
 
     response = MassiveScatterDataset(output).view(
