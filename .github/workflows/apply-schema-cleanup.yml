@@ -1,0 +1,97 @@
+name: Apply schema cleanup
+
+on:
+  push:
+    branches:
+      - cleanup/schema-v3-only-20260831
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Add temporary schema cleanup workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Apply cleanup and regenerate lockfile
+        run: |
+          python .github/schema_v3_cleanup.py
+          uv lock
+      - name: Publish cleanup through GitHub REST API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          repo = os.environ['REPO']
+          branch = os.environ['BRANCH']
+          headers = {
+              'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+
+          def request(method, url, payload=None):
+              req = Request(
+                  url,
+                  data=None if payload is None else json.dumps(payload).encode(),
+                  headers=headers,
+                  method=method,
+              )
+              with urlopen(req) as response:
+                  return json.load(response)
+
+          def current(path):
+              return request(
+                  'GET',
+                  f'https://api.github.com/repos/{repo}/contents/{quote(path)}?ref={quote(branch)}',
+              )
+
+          files = [
+              'README.md',
+              'pyproject.toml',
+              'uv.lock',
+              'src/massive_scatter/builder.py',
+              'src/massive_scatter/cli.py',
+              'tests/test_build_query.py',
+              'tests/test_lod.py',
+              'tests/test_manifest.py',
+              'tests/test_plot_api.py',
+              'tests/test_sparse_lod.py',
+          ]
+          for path in files:
+              before = current(path)
+              request(
+                  'PUT',
+                  f'https://api.github.com/repos/{repo}/contents/{quote(path)}',
+                  {
+                      'message': f'Purge legacy schema support: {path}',
+                      'content': base64.b64encode(Path(path).read_bytes()).decode(),
+                      'sha': before['sha'],
+                      'branch': branch,
+                  },
+              )
+
+          path = 'src/massive_scatter/lod.py'
+          before = current(path)
+          request(
+              'DELETE',
+              f'https://api.github.com/repos/{repo}/contents/{quote(path)}',
+              {
+                  'message': 'Delete legacy Zarr LOD backend',
+                  'sha': before['sha'],
+                  'branch': branch,
+              },
+          )
+          PY
