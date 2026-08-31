@@ -1,0 +1,62 @@
+name: Benchmark sparse LOD
+
+on:
+  push:
+    branches:
+      - feature/sparse-lod-20260830
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-groups
+      - name: Benchmark one million isolated LOD cells
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from time import perf_counter
+
+          import numpy as np
+          import pyarrow as pa
+          import pyarrow.parquet as pq
+
+          from massive_scatter.sparse_lod import build_sparse_lod_pyramid
+
+          n = 1_000_000
+          with TemporaryDirectory() as raw:
+              root = Path(raw)
+              points = root / 'points'
+              points.mkdir()
+              path = points / 'part-000000.parquet'
+              x = np.arange(n, dtype=np.int64)
+              y = np.arange(n, dtype=np.int64) * 100_000
+              pq.write_table(pa.table({'x': x, 'y': y}), path, compression='zstd')
+
+              start = perf_counter()
+              last = start
+              def progress(message: str) -> None:
+                  global last
+                  now = perf_counter()
+                  print(f'BENCH t={now-start:.3f}s delta={now-last:.3f}s {message}', flush=True)
+                  last = now
+
+              levels = build_sparse_lod_pyramid(
+                  root,
+                  point_files=[path],
+                  point_count=n,
+                  min_x=0,
+                  max_x=n - 1,
+                  min_y=0,
+                  max_y=(n - 1) * 100_000,
+                  base_cell_size=64,
+                  batch_size=131_072,
+                  part_rows=1_000_000,
+                  progress=progress,
+              )
+              elapsed = perf_counter() - start
+              print(f'BENCH total={elapsed:.3f}s levels={len(levels)}')
+              print('BENCH occupied=' + ','.join(str(level.occupied_cells) for level in levels))
+          PY
