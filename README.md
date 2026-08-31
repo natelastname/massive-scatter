@@ -5,38 +5,42 @@ far larger than an in-memory raster. Exact points remain the source of truth;
 zoomed-out views use sparse numerical level-of-detail (LOD) arrays rather than a
 pyramid of pre-rendered PNG tiles.
 
-The MVP is aimed at integer-coordinate scientific sequences and similarly sparse
-point sets:
+The project is aimed at integer-coordinate scientific sequences and similarly
+sparse point sets:
 
 - exact `int64` coordinates stored in partitioned Parquet;
 - bounded-memory Arrow batch ingestion;
-- sparse Zarr v3 arrays containing `count` and optional `color_max` reductions;
-- exact-point responses at high zoom and aggregate responses at low zoom;
+- sparse Zarr v3 numerical LOD arrays;
+- exact-point responses at high zoom and aggregate square-cell responses at low
+  zoom;
+- mergeable field reductions (`sum`, `mean`, `min`, `max`) compiled from plot
+  encodings;
 - a FastAPI viewport service;
-- a deck.gl orthographic viewer with dots, pan/zoom, axes, and hover values.
+- a deck.gl orthographic viewer with pan/zoom, axes, hover values, per-point
+  styling, and generated legends.
 
 ## Why this does not allocate the rectangular figure
 
 A dataset may occupy a logical rectangle billions of units wide and high while
 containing only millions of points. `massive-scatter` never creates that dense
-image. Its canonical artifact is:
+image. Its canonical artifact is approximately:
 
 ```text
 example.msplot/
-├── manifest.json          # bounds, int64 origin, LOD metadata
+├── manifest.json          # bounds, int64 origin, plot grammar, LOD metadata
 ├── index.parquet          # bounding box and count for each point part
 ├── points/
-│   └── part-*.parquet     # exact points
+│   └── part-*.parquet     # exact points and exact-only style fields
 └── lod.zarr/
     └── levels/*/
-        ├── count          # sparse numerical chunks
-        └── color_max      # optional sparse numerical chunks
+        ├── count
+        └── aggregates/
+            └── */         # mergeable reducer state
 ```
 
-The finest numerical LOD intentionally begins at `base_cell_size` units per
-cell (64 by default). Below that scale the viewer asks for exact points. This
-avoids generating high-resolution image tiles that contain only a handful of
-points and could have been rendered directly.
+The finest numerical LOD begins at `base_cell_size` units per cell (64 by
+default). Below that scale the viewer asks for exact points. Aggregate cells are
+rendered as the square spatial bins they represent.
 
 ## Installation
 
@@ -60,8 +64,7 @@ server can find it.
 
 ## Quick start
 
-Generate a deterministic million-point, roughly square test plot without ever
-holding all points in memory:
+Generate a deterministic million-point test plot:
 
 ```bash
 uv run massive-scatter generate demo.msplot --points 1000000
@@ -71,7 +74,7 @@ uv run massive-scatter serve demo.msplot
 
 Open `http://127.0.0.1:8000`.
 
-Build from Parquet or CSV/TSV:
+The original direct builder remains supported:
 
 ```bash
 uv run massive-scatter build points.parquet figure.msplot \
@@ -80,8 +83,8 @@ uv run massive-scatter build points.parquet figure.msplot \
   --color support-weight
 ```
 
-The x and y columns must be integer-valued. The optional color column must be
-numeric.
+The x and y columns must be integer-valued. The legacy `--color` column is
+numeric and uses a `max` reducer at aggregate LOD.
 
 Useful commands:
 
@@ -91,19 +94,132 @@ uv run massive-scatter check figure.msplot
 uv run massive-scatter serve figure.msplot --port 8080
 ```
 
-Important build controls:
+## Matplotlib-like plot grammar
 
-```text
---batch-size       Arrow/Parquet scan batch size (default 131072)
---part-rows        target rows per exact-point Parquet part (default 1000000)
---tile-size        numerical Zarr chunk width/height (default 256)
---base-cell-size   first aggregate cell width/height in native units (default 64)
---overwrite        replace an existing output dataset
+For richer figures, use the Python plotting surface. It copies familiar
+Matplotlib concepts while compiling them to a declarative, out-of-core plot
+specification:
+
+```python
+import massive_scatter as ms
+
+fig, ax = ms.subplots()
+
+ax.scatter(
+    "points.parquet",
+    x="n",
+    y="value",
+    c=ms.mean("omega"),
+    cmap="viridis",
+    marker=ms.field("event_type"),
+    s="importance",
+    alpha=0.9,
+    label="Enots-Wolley",
+)
+
+ax.set(
+    title="Enots-Wolley sequence",
+    xlabel="n",
+    ylabel="a(n)",
+)
+ax.legend()
+
+fig.write("ew.msplot")
 ```
 
-## Python API
+`source` may also be an iterable of Arrow `RecordBatch` or `Table` objects, so
+large generated data does not need to be materialized in Python memory.
 
-The core API consumes an iterable of Arrow batches:
+### Encodings
+
+The first grammar supports:
+
+```text
+x, y       source coordinate fields (integer)
+c           numeric field or mergeable reducer expression
+color       constant CSS color (mutually exclusive with c)
+cmap        viridis, plasma, or magma
+marker      constant marker or categorical field
+s           constant size or numeric exact-point field
+alpha       constant, count(), or numeric mergeable field
+label       legend label
+```
+
+Examples:
+
+```python
+# Constant styling.
+ax.scatter(source, x="x", y="y", color="#ff0080", marker="^", s=4)
+
+# Default mean reduction for a numeric color field.
+ax.scatter(source, x="x", y="y", c="score")
+
+# Explicit aggregate semantics.
+ax.scatter(source, x="x", y="y", c=ms.max("score"))
+ax.scatter(source, x="x", y="y", c=ms.mean("score"), alpha=ms.count())
+```
+
+Available reducer constructors are:
+
+```python
+ms.sum("field")
+ms.mean("field")
+ms.min("field")
+ms.max("field")
+ms.count()          # implicit spatial-cell population
+ms.field("field")  # field reference; channel supplies its default reducer
+```
+
+### LOD contract
+
+Every aggregate reducer stores mergeable sufficient state. Higher LOD levels
+are built solely by merging child state; raw points are not reopened.
+
+| reducer | persisted state | parent merge | finalized value |
+| --- | --- | --- | --- |
+| `count()` | `n` | sum | `n` |
+| `sum(x)` | `sum` | sum | `sum` |
+| `mean(x)` | `sum`, `n` | componentwise sum | `sum / n` |
+| `min(x)` | `min` | min | `min` |
+| `max(x)` | `max` | max | `max` |
+
+In particular, `mean` is never implemented as a mean of child means.
+
+`x` and `y` are not reducers: they determine the spatial bin. At aggregate LOD
+the rendered object is that square bin.
+
+Marker and size fields are deliberately **exact-point-only**. Once points are
+aggregated, the viewer renders square spatial cells rather than inventing an
+arbitrary aggregate marker or size. Numeric color and alpha encodings use their
+finalized reducer values.
+
+Categorical exact-point fields currently support at most 32 global values. This
+keeps marker domains and generated legends bounded; high-cardinality categorical
+sketches are future work.
+
+### Current grammar scope
+
+The current API intentionally supports one figure, one axes, and one massive
+scatter layer. Multiple subplots and multiple layers are not yet implemented.
+This is a scope boundary, not an attempt to emulate unsupported Matplotlib
+behavior.
+
+Axes metadata currently includes:
+
+```python
+ax.set_title("title")
+ax.set_xlabel("x")
+ax.set_ylabel("y")
+ax.set(title="title", xlabel="x", ylabel="y")
+ax.legend()
+```
+
+The viewer generates categorical marker keys and continuous color bars from the
+compiled manifest.
+
+## Direct Python builder
+
+The lower-level API still consumes an iterable of Arrow batches:
 
 ```python
 import pyarrow as pa
@@ -128,7 +244,18 @@ build_dataset(
 ```
 
 Peak build memory is governed by the caller's batch, one output Parquet part,
-and a few fixed-size Zarr chunks—not by the total point count or viewport area.
+and a small number of fixed-size Zarr chunks—not by total point count or
+rectangular extent.
+
+Important build controls:
+
+```text
+--batch-size       Arrow/Parquet scan batch size (default 131072)
+--part-rows        target rows per exact-point Parquet part (default 1000000)
+--tile-size        numerical Zarr chunk width/height (default 256)
+--base-cell-size   first aggregate cell width/height in native units (default 64)
+--overwrite        replace an existing output dataset
+```
 
 ## Precision model
 
@@ -145,14 +272,13 @@ The tested invariant is:
 > Two source points one unit apart remain one unit apart in an exact viewport,
 > even when their absolute coordinates exceed JavaScript's `2^53` integer limit.
 
-For the MVP, each axis *span* must be at most `2^53 - 1`; the absolute origin may
-use the full signed `int64` range. Supporting spans larger than that requires a
+For now, each axis *span* must be at most `2^53 - 1`; the absolute origin may use
+the full signed `int64` range. Supporting spans larger than that requires a
 segmented/BigInt camera state, not merely a different storage type.
 
 ## View API
 
-`POST /api/view` accepts dataset-relative viewport data as JSON in the request
-body rather than encoding the camera state in the URL:
+`POST /api/view` accepts dataset-relative viewport data as JSON:
 
 ```json
 {
@@ -167,10 +293,10 @@ body rather than encoding the camera state in the URL:
 }
 ```
 
-At high zoom the response contains exact points as offsets from a local origin.
-If the exact result would exceed the point budget, the server selects a Zarr LOD
-whose numerical grid fits the requested display budget. No raster image tiles
-are generated or transferred.
+At high zoom the response contains exact points and requested exact style fields
+as offsets from a local origin. If the exact result exceeds the point budget,
+the server selects a Zarr LOD and returns finalized aggregate values plus cell
+counts. No raster image tiles are generated or transferred.
 
 ## Development
 
@@ -185,7 +311,7 @@ npm test
 npm run build
 ```
 
-The current MVP deliberately leaves several extensions for later work: Arrow IPC
-or binary HTTP responses, pluggable reductions, appendable datasets, parallel LOD
-construction, sharded Zarr storage, and a general spatial index for point clouds
-whose Parquet part bounding boxes overlap heavily.
+Likely future extensions include multiple layers, categorical aggregate
+histograms/top-k summaries, more visual scales, Arrow IPC or binary HTTP
+responses, approximate mergeable reducers (quantiles/heavy hitters), appendable
+datasets, and parallel LOD construction.
