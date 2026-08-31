@@ -350,6 +350,11 @@ function datumSize(datum: PlotDatum): number {
 function renderLayer(response: ViewResponse) {
   const data = responseData(response);
   const aggregate = response.mode === 'aggregate';
+  if (manifest.plot?.scatter.color.kind === 'constant') {
+    currentColorRange = null;
+  } else if (manifest.plot) {
+    currentColorRange = encodingRange(manifest.plot.scatter.color, data, aggregate);
+  }
   renderOrigin = response.origin;
   const renderViewState = toRenderViewState(worldViewState, renderOrigin);
 
