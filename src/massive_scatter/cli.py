@@ -30,7 +30,6 @@ def build(
     x: str = "x",
     y: str = "y",
     color: str | None = None,
-    tile_size: int = 256,
     base_cell_size: int = 64,
     part_rows: int = 1_000_000,
     batch_size: int = 131_072,
@@ -47,7 +46,6 @@ def build(
         y=y,
         color=color,
         config=BuildConfig(
-            tile_size=tile_size,
             base_cell_size=base_cell_size,
             part_rows=part_rows,
             batch_size=batch_size,
@@ -63,7 +61,6 @@ def generate(
     *,
     points: int = 1_000_000,
     batch_size: int = 131_072,
-    tile_size: int = 256,
     base_cell_size: int = 64,
     origin_x: int = 0,
     origin_y: int = 0,
@@ -81,7 +78,6 @@ def generate(
         ),
         color="color",
         config=BuildConfig(
-            tile_size=tile_size,
             base_cell_size=base_cell_size,
             part_rows=max(batch_size, 1_000_000),
             batch_size=batch_size,
