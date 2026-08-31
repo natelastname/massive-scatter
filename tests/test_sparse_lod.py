@@ -32,7 +32,7 @@ def test_extreme_aspect_ratio_uses_sparse_cell_rows(tmp_path):
 
     parts = sorted((output / "lod" / "0").glob("part-*.parquet"))
     assert len(parts) == math.ceil(point_count / 1024)
-    assert len(parts) << point_count
+    assert len(parts) < point_count // 100
 
     dataset = MassiveScatterDataset(output)
     assert dataset.check() == []
