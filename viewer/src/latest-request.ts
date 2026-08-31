@@ -1,5 +1,6 @@
 export type AsyncTask<T> = () => Promise<T>;
 export type Commit<T> = (value: T) => void;
+export type Reject = (error: unknown) => void;
 
 /**
  * Run at most one asynchronous request at a time while retaining only the
@@ -14,26 +15,30 @@ export class LatestRequestRunner<T> {
   private generation = 0;
   private pending: {generation: number; task: AsyncTask<T>} | null = null;
 
-  enqueue(task: AsyncTask<T>, commit: Commit<T>): void {
+  enqueue(task: AsyncTask<T>, commit: Commit<T>, reject: Reject = () => {}): void {
     const generation = ++this.generation;
     this.pending = {generation, task};
-    if (!this.running) void this.drain(commit);
+    if (!this.running) void this.drain(commit, reject);
   }
 
-  private async drain(commit: Commit<T>): Promise<void> {
+  private async drain(commit: Commit<T>, reject: Reject): Promise<void> {
     this.running = true;
     try {
       while (this.pending) {
         const current = this.pending;
         this.pending = null;
-        const value = await current.task();
-        if (current.generation === this.generation) commit(value);
+        try {
+          const value = await current.task();
+          if (current.generation === this.generation) commit(value);
+        } catch (error) {
+          if (current.generation === this.generation) reject(error);
+        }
       }
     } finally {
       this.running = false;
       // A task can be enqueued between the loop observing no pending work and
       // the finally block. Ensure that race still gets drained.
-      if (this.pending) void this.drain(commit);
+      if (this.pending) void this.drain(commit, reject);
     }
   }
 }
