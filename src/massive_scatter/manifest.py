@@ -7,8 +7,8 @@ from typing import Any
 
 from .spec import AggregateRequest, PlotManifest
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 MAX_SAFE_VIEWER_EXTENT = 2**53 - 1
 
 
@@ -18,15 +18,20 @@ class LevelManifest:
     cell_size: int
     height: int
     width: int
-    occupied_chunks: int
+    occupied_chunks: int = 0
+    occupied_cells: int = 0
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "level": self.level,
             "cell_size": self.cell_size,
             "shape": [self.height, self.width],
-            "occupied_chunks": self.occupied_chunks,
         }
+        if self.occupied_chunks:
+            result["occupied_chunks"] = self.occupied_chunks
+        if self.occupied_cells:
+            result["occupied_cells"] = self.occupied_cells
+        return result
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> LevelManifest:
@@ -36,7 +41,8 @@ class LevelManifest:
             cell_size=int(value["cell_size"]),
             height=int(height),
             width=int(width),
-            occupied_chunks=int(value["occupied_chunks"]),
+            occupied_chunks=int(value.get("occupied_chunks", 0)),
+            occupied_cells=int(value.get("occupied_cells", 0)),
         )
 
 
@@ -56,6 +62,7 @@ class Manifest:
     exact_fields: dict[str, str] = field(default_factory=dict)
     aggregates: tuple[AggregateRequest, ...] = ()
     plot: PlotManifest | None = None
+    lod_storage: str | None = None
     schema_version: int = SCHEMA_VERSION
 
     @property
@@ -70,6 +77,10 @@ class Manifest:
     def max_level(self) -> int:
         return self.levels[-1].level
 
+    @property
+    def uses_sparse_lod(self) -> bool:
+        return self.schema_version >= 3 and self.lod_storage == "sparse_parquet"
+
     def validate(self) -> None:
         if self.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
             supported = ", ".join(
@@ -79,6 +90,8 @@ class Manifest:
                 f"Unsupported manifest schema {self.schema_version}; "
                 f"supported versions are {supported}."
             )
+        if self.schema_version >= 3 and self.lod_storage != "sparse_parquet":
+            raise ValueError("Schema v3 datasets must use sparse_parquet LOD storage.")
         if self.point_count <= 0:
             raise ValueError("A plot must contain at least one point.")
         if self.max_x < self.min_x or self.max_y < self.min_y:
@@ -104,6 +117,8 @@ class Manifest:
                 raise ValueError("LOD cell sizes must double at every level.")
             if level.height <= 0 or level.width <= 0:
                 raise ValueError("LOD shapes must be positive.")
+            if self.uses_sparse_lod and level.occupied_cells <= 0:
+                raise ValueError("Sparse LOD levels must contain occupied cells.")
             if previous is not None:
                 if level.height != (previous.height + 1) // 2:
                     raise ValueError("LOD heights do not form a factor-two pyramid.")
@@ -147,6 +162,8 @@ class Manifest:
             "color_field": self.color_field,
             "levels": [level.to_dict() for level in self.levels],
         }
+        if self.lod_storage is not None:
+            result["lod_storage"] = self.lod_storage
         if self.exact_fields:
             result["exact_fields"] = dict(self.exact_fields)
         if self.aggregates:
@@ -179,6 +196,11 @@ class Manifest:
             plot=(
                 PlotManifest.from_dict(value["plot"])
                 if value.get("plot") is not None
+                else None
+            ),
+            lod_storage=(
+                str(value["lod_storage"])
+                if value.get("lod_storage") is not None
                 else None
             ),
         )
