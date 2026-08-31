@@ -278,15 +278,11 @@ def _downsample_sum(values: np.ndarray) -> np.ndarray:
 def _downsample_extreme(values: np.ndarray, *, reducer: str) -> np.ndarray:
     height, width = values.shape
     fill = np.inf if reducer == "min" else -np.inf
-    padded = np.full(
-        (height + height % 2, width + width % 2), fill, dtype=np.float64
-    )
+    padded = np.full((height + height % 2, width + width % 2), fill, dtype=np.float64)
     padded[:height, :width] = np.where(np.isnan(values), fill, values)
     reshaped = padded.reshape(padded.shape[0] // 2, 2, padded.shape[1] // 2, 2)
     result = (
-        reshaped.min(axis=(1, 3))
-        if reducer == "min"
-        else reshaped.max(axis=(1, 3))
+        reshaped.min(axis=(1, 3)) if reducer == "min" else reshaped.max(axis=(1, 3))
     )
     result[~np.isfinite(result)] = np.nan
     return result
