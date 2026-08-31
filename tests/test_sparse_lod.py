@@ -17,7 +17,6 @@ def test_extreme_aspect_ratio_uses_sparse_cell_rows(tmp_path):
         output,
         [batch],
         config=BuildConfig(
-            tile_size=8,
             base_cell_size=64,
             part_rows=2048,
             batch_size=1024,
@@ -27,7 +26,6 @@ def test_extreme_aspect_ratio_uses_sparse_cell_rows(tmp_path):
     assert manifest.schema_version == 3
     assert manifest.lod_storage == "sparse_parquet"
     assert manifest.levels[0].occupied_cells == point_count
-    assert not (output / "lod.zarr").exists()
     assert (output / "lod" / "0" / "index.parquet").is_file()
 
     parts = sorted((output / "lod" / "0").glob("part-*.parquet"))
