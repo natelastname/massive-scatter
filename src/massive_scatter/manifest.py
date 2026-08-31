@@ -72,7 +72,9 @@ class Manifest:
 
     def validate(self) -> None:
         if self.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
-            supported = ", ".join(str(value) for value in sorted(SUPPORTED_SCHEMA_VERSIONS))
+            supported = ", ".join(
+                str(value) for value in sorted(SUPPORTED_SCHEMA_VERSIONS)
+            )
             raise ValueError(
                 f"Unsupported manifest schema {self.schema_version}; "
                 f"supported versions are {supported}."
