@@ -1,9 +1,8 @@
-from massive_scatter.manifest import LevelManifest, Manifest
+from massive_scatter.manifest import SCHEMA_VERSION, LevelManifest, Manifest
 
 
-def test_manifest_round_trip_preserves_large_int64_origin(tmp_path):
-    origin = 9_100_000_000_000_000
-    manifest = Manifest(
+def _manifest(origin: int, *, schema_version: int = SCHEMA_VERSION) -> Manifest:
+    return Manifest(
         point_count=2,
         min_x=origin,
         max_x=origin + 1,
@@ -21,9 +20,24 @@ def test_manifest_round_trip_preserves_large_int64_origin(tmp_path):
                 occupied_chunks=1,
             ),
         ),
+        schema_version=schema_version,
     )
+
+
+def test_manifest_round_trip_preserves_large_int64_origin(tmp_path):
+    origin = 9_100_000_000_000_000
+    manifest = _manifest(origin)
     manifest.save(tmp_path)
 
     raw = (tmp_path / "manifest.json").read_text()
     assert f'"min_x": "{origin}"' in raw
+    assert f'"schema_version": {SCHEMA_VERSION}' in raw
     assert Manifest.load(tmp_path) == manifest
+
+
+def test_manifest_reader_accepts_legacy_schema_v1():
+    origin = 9_100_000_000_000_000
+    legacy = _manifest(origin, schema_version=1)
+    loaded = Manifest.from_dict(legacy.to_dict())
+    assert loaded.schema_version == 1
+    assert loaded.min_x == origin
