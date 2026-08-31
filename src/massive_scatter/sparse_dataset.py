@@ -106,9 +106,7 @@ class SparseLodReader:
             level = self.manifest.levels[level.level + 1]
 
     @staticmethod
-    def _finalized_aggregate(
-        request: AggregateRequest, table
-    ) -> list[float]:
+    def _finalized_aggregate(request: AggregateRequest, table) -> list[float]:
         state = sparse_state_columns(request)
         if request.reducer == "sum":
             values = np.asarray(table[state[0]].combine_chunks(), dtype=np.float64)
@@ -167,9 +165,7 @@ class SparseLodReader:
 
         if x0 >= x1 or y0 >= y1:
             return empty()
-        paths, _ = self._candidate_parts(
-            level.level, x0=x0, x1=x1, y0=y0, y1=y1
-        )
+        paths, _ = self._candidate_parts(level.level, x0=x0, x1=x1, y0=y0, y1=y1)
         if not paths:
             return empty()
 
