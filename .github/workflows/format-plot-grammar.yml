@@ -1,0 +1,77 @@
+name: Format plot grammar
+
+on:
+  push:
+    branches:
+      - feature/plot-grammar-20260830
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.event.head_commit.message != 'Apply Black formatting [skip format]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-groups
+      - name: Format changed Python files
+        run: |
+          uv run black \
+            src/massive_scatter/builder.py \
+            src/massive_scatter/dataset.py \
+            src/massive_scatter/lod.py \
+            src/massive_scatter/spec.py \
+            tests/test_plot_api.py
+      - name: Write formatted files through GitHub REST API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          paths = [
+              'src/massive_scatter/builder.py',
+              'src/massive_scatter/dataset.py',
+              'src/massive_scatter/lod.py',
+              'src/massive_scatter/spec.py',
+              'tests/test_plot_api.py',
+          ]
+          token = os.environ['GH_TOKEN']
+          repo = os.environ['REPO']
+          branch = os.environ['BRANCH']
+          headers = {
+              'Authorization': f'Bearer {token}',
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+
+          def request(method, url, payload=None):
+              body = None if payload is None else json.dumps(payload).encode()
+              req = Request(url, data=body, headers=headers, method=method)
+              with urlopen(req) as response:
+                  return json.load(response)
+
+          for path in paths:
+              if os.system(f'git diff --quiet -- {quote(path)}') == 0:
+                  continue
+              url = f'https://api.github.com/repos/{repo}/contents/{quote(path)}?ref={quote(branch)}'
+              current = request('GET', url)
+              content = base64.b64encode(Path(path).read_bytes()).decode()
+              write_url = f'https://api.github.com/repos/{repo}/contents/{quote(path)}'
+              request('PUT', write_url, {
+                  'message': 'Apply Black formatting [skip format]',
+                  'content': content,
+                  'sha': current['sha'],
+                  'branch': branch,
+              })
+          PY
