@@ -143,9 +143,7 @@ class SparseLodReader:
             level = self.manifest.levels[level.level + 1]
 
     @staticmethod
-    def _finalized_aggregate(
-        request: AggregateRequest, table: pa.Table
-    ) -> list[float]:
+    def _finalized_aggregate(request: AggregateRequest, table: pa.Table) -> list[float]:
         state = sparse_state_columns(request)
         if request.reducer == "sum":
             values = np.asarray(table[state[0]].combine_chunks(), dtype=np.float64)
@@ -296,9 +294,7 @@ class SparseLodReader:
             total = 0
             for path in top_parts:
                 values = pq.read_table(path, columns=["count"])["count"]
-                total += int(
-                    np.asarray(values.combine_chunks(), dtype=np.uint64).sum()
-                )
+                total += int(np.asarray(values.combine_chunks(), dtype=np.uint64).sum())
             if total != self.manifest.point_count:
                 problems.append(
                     f"top-level count sum {total} != manifest point count "
