@@ -7,7 +7,8 @@ from typing import Any
 
 from .spec import AggregateRequest, PlotManifest
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 MAX_SAFE_VIEWER_EXTENT = 2**53 - 1
 
 
@@ -70,10 +71,11 @@ class Manifest:
         return self.levels[-1].level
 
     def validate(self) -> None:
-        if self.schema_version != SCHEMA_VERSION:
+        if self.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            supported = ", ".join(str(value) for value in sorted(SUPPORTED_SCHEMA_VERSIONS))
             raise ValueError(
                 f"Unsupported manifest schema {self.schema_version}; "
-                f"expected {SCHEMA_VERSION}."
+                f"supported versions are {supported}."
             )
         if self.point_count <= 0:
             raise ValueError("A plot must contain at least one point.")
