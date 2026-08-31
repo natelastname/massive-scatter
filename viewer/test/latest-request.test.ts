@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {LatestRequestRunner} from '../src/latest-request';
+import {LatestRequestRunner} from '../src/latest-request.ts';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
