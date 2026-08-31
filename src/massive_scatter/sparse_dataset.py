@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.dataset as pads
 import pyarrow.parquet as pq
 
@@ -13,20 +14,56 @@ from .sparse_lod import sparse_level_columns, sparse_state_columns
 from .spec import AggregateRequest
 
 
+class _IndexRow(TypedDict):
+    path: str
+    count: int
+    min_x: int
+    max_x: int
+    min_y: int
+    max_y: int
+
+
+def _index_row(value: dict[str, object]) -> _IndexRow:
+    path = value.get("path")
+    count = value.get("count")
+    min_x = value.get("min_x")
+    max_x = value.get("max_x")
+    min_y = value.get("min_y")
+    max_y = value.get("max_y")
+    if not isinstance(path, str):
+        raise TypeError("Sparse LOD index path must be a string.")
+    integers = (count, min_x, max_x, min_y, max_y)
+    if not all(isinstance(item, int) for item in integers):
+        raise TypeError("Sparse LOD index bounds/count must be integers.")
+    assert isinstance(count, int)
+    assert isinstance(min_x, int)
+    assert isinstance(max_x, int)
+    assert isinstance(min_y, int)
+    assert isinstance(max_y, int)
+    return {
+        "path": path,
+        "count": count,
+        "min_x": min_x,
+        "max_x": max_x,
+        "min_y": min_y,
+        "max_y": max_y,
+    }
+
+
 class SparseLodReader:
     """Read occupied-cell Parquet LOD levels with coarse part pruning."""
 
     def __init__(self, path: Path, manifest: Manifest) -> None:
         self.path = path
         self.manifest = manifest
-        self._indexes: dict[int, list[dict[str, object]]] = {}
+        self._indexes: dict[int, list[_IndexRow]] = {}
 
-    def _index(self, level: int) -> list[dict[str, object]]:
+    def _index(self, level: int) -> list[_IndexRow]:
         cached = self._indexes.get(level)
         if cached is not None:
             return cached
         path = self.path / "lod" / str(level) / "index.parquet"
-        rows = pq.read_table(path).to_pylist()
+        rows = [_index_row(row) for row in pq.read_table(path).to_pylist()]
         self._indexes[level] = rows
         return rows
 
@@ -43,14 +80,14 @@ class SparseLodReader:
         upper_bound = 0
         for part in self._index(level):
             if (
-                int(part["max_x"]) < x0
-                or int(part["min_x"]) >= x1
-                or int(part["max_y"]) < y0
-                or int(part["min_y"]) >= y1
+                part["max_x"] < x0
+                or part["min_x"] >= x1
+                or part["max_y"] < y0
+                or part["min_y"] >= y1
             ):
                 continue
-            paths.append(self.path / str(part["path"]))
-            upper_bound += int(part["count"])
+            paths.append(self.path / part["path"])
+            upper_bound += part["count"]
         return paths, upper_bound
 
     @staticmethod
@@ -106,7 +143,9 @@ class SparseLodReader:
             level = self.manifest.levels[level.level + 1]
 
     @staticmethod
-    def _finalized_aggregate(request: AggregateRequest, table) -> list[float]:
+    def _finalized_aggregate(
+        request: AggregateRequest, table: pa.Table
+    ) -> list[float]:
         state = sparse_state_columns(request)
         if request.reducer == "sum":
             values = np.asarray(table[state[0]].combine_chunks(), dtype=np.float64)
@@ -236,14 +275,14 @@ class SparseLodReader:
                 problems.append(f"missing LOD {level.level} index")
                 continue
             parts = self._index(level.level)
-            indexed_cells = sum(int(part["count"]) for part in parts)
+            indexed_cells = sum(part["count"] for part in parts)
             if indexed_cells != level.occupied_cells:
                 problems.append(
                     f"LOD {level.level} index count {indexed_cells} != manifest "
                     f"occupied-cell count {level.occupied_cells}"
                 )
             for part in parts:
-                path = self.path / str(part["path"])
+                path = self.path / part["path"]
                 if not path.is_file():
                     problems.append(f"missing LOD part: {part['path']}")
                     continue
@@ -252,12 +291,14 @@ class SparseLodReader:
                     problems.append(f"LOD part schema differs: {part['path']}")
 
         top = self.manifest.levels[-1]
-        top_parts = [self.path / str(part["path"]) for part in self._index(top.level)]
+        top_parts = [self.path / part["path"] for part in self._index(top.level)]
         if top_parts:
             total = 0
             for path in top_parts:
                 values = pq.read_table(path, columns=["count"])["count"]
-                total += sum(int(value) for value in values.to_pylist())
+                total += int(
+                    np.asarray(values.combine_chunks(), dtype=np.uint64).sum()
+                )
             if total != self.manifest.point_count:
                 problems.append(
                     f"top-level count sum {total} != manifest point count "
