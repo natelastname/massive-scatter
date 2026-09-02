@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.dataset as pads
 import pyarrow.parquet as pq
 
-from .manifest import LevelManifest, Manifest
+from .manifest import LayerManifest, LevelManifest
 from .sparse_lod import sparse_level_columns, sparse_state_columns
 from .spec import AggregateRequest
 
@@ -53,7 +53,7 @@ def _index_row(value: dict[str, object]) -> _IndexRow:
 class SparseLodReader:
     """Read occupied-cell Parquet LOD levels with coarse part pruning."""
 
-    def __init__(self, path: Path, manifest: Manifest) -> None:
+    def __init__(self, path: Path, manifest: LayerManifest) -> None:
         self.path = path
         self.manifest = manifest
         self._indexes: dict[int, list[_IndexRow]] = {}

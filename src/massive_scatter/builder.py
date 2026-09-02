@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,9 +11,9 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from .manifest import MAX_SAFE_VIEWER_EXTENT, Manifest
+from .manifest import MAX_SAFE_VIEWER_EXTENT, LayerManifest, Manifest
 from .sparse_lod import build_sparse_lod_pyramid
-from .spec import AggregateRequest, CompiledPlot, PlotManifest
+from .spec import AggregateRequest, AxesManifest, CompiledPlot, PlotManifest
 
 Progress = Callable[[str], None]
 MAX_CATEGORIES = 32
@@ -35,6 +35,18 @@ class BuildConfig:
             raise ValueError("part_rows must be positive.")
         if self.batch_size < 1:
             raise ValueError("batch_size must be positive.")
+
+
+@dataclass(slots=True)
+class LayerBuild:
+    """One independently stored scatter layer to include in a figure build."""
+
+    batches: Iterable[pa.RecordBatch | pa.Table]
+    x: str = "x"
+    y: str = "y"
+    color: str | None = None
+    plot: CompiledPlot | None = None
+    zorder: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,38 +89,38 @@ def _canonical_table(
         "y": pc.cast(y, pa.int64(), safe=True),
     }
     for source, storage in exact_fields.items():
-        field = table[source]
-        if field.null_count:
+        source_field = table[source]
+        if source_field.null_count:
             raise ValueError(f"Field {source!r} may not contain null values.")
         kind = field_kinds[source]
         if kind == "numeric":
             if not (
-                pa.types.is_integer(field.type)
-                or pa.types.is_floating(field.type)
-                or pa.types.is_decimal(field.type)
+                pa.types.is_integer(source_field.type)
+                or pa.types.is_floating(source_field.type)
+                or pa.types.is_decimal(source_field.type)
             ):
                 raise TypeError(f"Field {source!r} must be numeric.")
-            field = pc.cast(field, pa.float64(), safe=True)
-            values = np.asarray(field.combine_chunks(), dtype=np.float64)
+            source_field = pc.cast(source_field, pa.float64(), safe=True)
+            values = np.asarray(source_field.combine_chunks(), dtype=np.float64)
             if not np.isfinite(values).all():
                 raise ValueError(f"Field {source!r} may not contain NaN or infinity.")
         elif kind == "categorical":
             if not (
-                pa.types.is_string(field.type)
-                or pa.types.is_large_string(field.type)
-                or pa.types.is_integer(field.type)
-                or pa.types.is_floating(field.type)
-                or pa.types.is_boolean(field.type)
-                or pa.types.is_dictionary(field.type)
+                pa.types.is_string(source_field.type)
+                or pa.types.is_large_string(source_field.type)
+                or pa.types.is_integer(source_field.type)
+                or pa.types.is_floating(source_field.type)
+                or pa.types.is_boolean(source_field.type)
+                or pa.types.is_dictionary(source_field.type)
             ):
                 raise TypeError(
                     f"Categorical field {source!r} must contain scalar strings, "
                     "numbers, or booleans."
                 )
-            field = pc.cast(field, pa.string(), safe=False)
+            source_field = pc.cast(source_field, pa.string(), safe=False)
         else:
             raise ValueError(f"Unknown field kind {kind!r} for {source!r}.")
-        columns[storage] = field
+        columns[storage] = source_field
 
     return pa.table(columns)
 
@@ -267,8 +279,177 @@ def _direct_contract(
     return (
         {color: "color"},
         {color: "numeric"},
-        (AggregateRequest("legacy_color", color, "color", "max"),),
+        (AggregateRequest("direct_color", color, "color", "max"),),
     )
+
+
+def _build_layer(
+    root: Path,
+    relative_path: Path,
+    *,
+    layer_id: str,
+    layer: LayerBuild,
+    settings: BuildConfig,
+    progress: Progress,
+) -> LayerManifest:
+    if layer.plot is not None and layer.color is not None:
+        raise ValueError("color= and plot= may not be combined")
+    if layer.plot is None:
+        exact_fields, field_kinds, aggregates = _direct_contract(layer.color)
+    else:
+        if layer.plot.x != layer.x or layer.plot.y != layer.y:
+            raise ValueError("Compiled plot x/y fields disagree with layer x/y fields.")
+        exact_fields = layer.plot.exact_fields
+        field_kinds = dict(layer.plot.field_kinds)
+        aggregates = layer.plot.aggregates
+
+    layer_path = root / relative_path
+    layer_path.mkdir(parents=True)
+    progress("streaming exact points to Parquet")
+    ingest = _write_point_parts(
+        layer_path,
+        layer.batches,
+        x_field=layer.x,
+        y_field=layer.y,
+        exact_fields=exact_fields,
+        field_kinds=field_kinds,
+        part_rows=settings.part_rows,
+        progress=progress,
+    )
+
+    width = ingest.max_x - ingest.min_x + 1
+    height = ingest.max_y - ingest.min_y + 1
+    if width > MAX_SAFE_VIEWER_EXTENT or height > MAX_SAFE_VIEWER_EXTENT:
+        raise ValueError(
+            "The viewer preserves arbitrary int64 origins, but each layer axis span "
+            "must be at most 2^53-1 so unit offsets remain exact in JavaScript."
+        )
+
+    levels = build_sparse_lod_pyramid(
+        layer_path,
+        point_files=list(ingest.point_files),
+        point_count=ingest.point_count,
+        min_x=ingest.min_x,
+        max_x=ingest.max_x,
+        min_y=ingest.min_y,
+        max_y=ingest.max_y,
+        base_cell_size=settings.base_cell_size,
+        batch_size=settings.batch_size,
+        part_rows=settings.part_rows,
+        aggregates=aggregates,
+        progress=progress,
+    )
+    plot_manifest = (
+        PlotManifest(
+            scatter=layer.plot.scatter,
+            axes=layer.plot.axes,
+            exact_fields=dict(layer.plot.exact_fields),
+            categorical_fields=ingest.categorical_fields,
+            numeric_ranges=ingest.numeric_ranges,
+        )
+        if layer.plot is not None
+        else None
+    )
+    return LayerManifest(
+        id=layer_id,
+        path=relative_path.as_posix(),
+        zorder=float(layer.zorder),
+        point_count=ingest.point_count,
+        min_x=ingest.min_x,
+        max_x=ingest.max_x,
+        min_y=ingest.min_y,
+        max_y=ingest.max_y,
+        base_cell_size=settings.base_cell_size,
+        color_field=layer.color,
+        levels=levels,
+        exact_fields=dict(exact_fields),
+        aggregates=aggregates,
+        plot=plot_manifest,
+    )
+
+
+def build_figure_dataset(
+    output: str | Path,
+    layers: Sequence[LayerBuild],
+    *,
+    axes: AxesManifest,
+    config: BuildConfig | None = None,
+    progress: Progress | None = None,
+) -> Manifest:
+    """Build one figure containing independently queryable scatter layers."""
+
+    if not layers:
+        raise ValueError("A figure must contain at least one scatter layer.")
+    settings = config or BuildConfig()
+    settings.validate()
+    report = progress or (lambda _message: None)
+    output_path = Path(output).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists() and not settings.overwrite:
+        raise FileExistsError(
+            f"{output_path} already exists; pass overwrite=True to replace it."
+        )
+
+    temporary_path = output_path.parent / f".{output_path.name}.tmp-{uuid.uuid4().hex}"
+    temporary_path.mkdir()
+    try:
+        built_layers: list[LayerManifest] = []
+        for index, layer in enumerate(layers):
+            layer_id = f"layer-{index:03d}"
+            relative_path = Path("layers") / layer_id
+
+            def layer_report(message: str, *, prefix: str = layer_id) -> None:
+                report(f"[{prefix}] {message}")
+
+            built_layers.append(
+                _build_layer(
+                    temporary_path,
+                    relative_path,
+                    layer_id=layer_id,
+                    layer=layer,
+                    settings=settings,
+                    progress=layer_report,
+                )
+            )
+
+        min_x = min(layer.min_x for layer in built_layers)
+        max_x = max(layer.max_x for layer in built_layers)
+        min_y = min(layer.min_y for layer in built_layers)
+        max_y = max(layer.max_y for layer in built_layers)
+        if (
+            max_x - min_x + 1 > MAX_SAFE_VIEWER_EXTENT
+            or max_y - min_y + 1 > MAX_SAFE_VIEWER_EXTENT
+        ):
+            raise ValueError(
+                "The union of layer coordinates exceeds 2^53-1 on an axis; the "
+                "viewer requires the shared figure span to remain exactly "
+                "representable."
+            )
+
+        manifest = Manifest(
+            min_x=min_x,
+            max_x=max_x,
+            min_y=min_y,
+            max_y=max_y,
+            axes=axes,
+            layers=tuple(built_layers),
+        )
+        manifest.save(temporary_path)
+
+        if output_path.exists():
+            if output_path.is_dir():
+                shutil.rmtree(output_path)
+            else:
+                output_path.unlink()
+        temporary_path.replace(output_path)
+        report(
+            f"built {output_path} with {manifest.point_count:,} points across "
+            f"{len(manifest.layers)} layer(s)"
+        )
+        return manifest
+    except BaseException:
+        shutil.rmtree(temporary_path, ignore_errors=True)
+        raise
 
 
 def build_dataset(
@@ -282,107 +463,15 @@ def build_dataset(
     progress: Progress | None = None,
     plot: CompiledPlot | None = None,
 ) -> Manifest:
-    """Build an exact-point store and sparse mergeable LOD pyramid.
-
-    ``plot`` is the compiled contract used by the higher-level Matplotlib-like
-    API. The x/y/color arguments form the lower-level direct builder API and
-    compile to the same generic reducer machinery.
-    """
+    """Build a one-layer figure using the same layered format as the plot API."""
 
     if plot is not None and color is not None:
         raise ValueError("color= and plot= may not be combined")
-    settings = config or BuildConfig()
-    settings.validate()
-    report = progress or (lambda _message: None)
-    output_path = Path(output).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists() and not settings.overwrite:
-        raise FileExistsError(
-            f"{output_path} already exists; pass overwrite=True to replace it."
-        )
-
-    if plot is None:
-        exact_fields, field_kinds, aggregates = _direct_contract(color)
-    else:
-        if plot.x != x or plot.y != y:
-            raise ValueError(
-                "Compiled plot x/y fields disagree with build_dataset x/y."
-            )
-        exact_fields = plot.exact_fields
-        field_kinds = dict(plot.field_kinds)
-        aggregates = plot.aggregates
-
-    temporary_path = output_path.parent / f".{output_path.name}.tmp-{uuid.uuid4().hex}"
-    temporary_path.mkdir()
-    try:
-        report("streaming exact points to Parquet")
-        ingest = _write_point_parts(
-            temporary_path,
-            batches,
-            x_field=x,
-            y_field=y,
-            exact_fields=exact_fields,
-            field_kinds=field_kinds,
-            part_rows=settings.part_rows,
-            progress=report,
-        )
-
-        width = ingest.max_x - ingest.min_x + 1
-        height = ingest.max_y - ingest.min_y + 1
-        if width > MAX_SAFE_VIEWER_EXTENT or height > MAX_SAFE_VIEWER_EXTENT:
-            raise ValueError(
-                "The viewer preserves arbitrary int64 origins, but each axis span must "
-                "be at most 2^53-1 so unit offsets remain exact in JavaScript."
-            )
-
-        levels = build_sparse_lod_pyramid(
-            temporary_path,
-            point_files=list(ingest.point_files),
-            point_count=ingest.point_count,
-            min_x=ingest.min_x,
-            max_x=ingest.max_x,
-            min_y=ingest.min_y,
-            max_y=ingest.max_y,
-            base_cell_size=settings.base_cell_size,
-            batch_size=settings.batch_size,
-            part_rows=settings.part_rows,
-            aggregates=aggregates,
-            progress=report,
-        )
-        plot_manifest = (
-            PlotManifest(
-                scatter=plot.scatter,
-                axes=plot.axes,
-                exact_fields=dict(plot.exact_fields),
-                categorical_fields=ingest.categorical_fields,
-                numeric_ranges=ingest.numeric_ranges,
-            )
-            if plot is not None
-            else None
-        )
-        manifest = Manifest(
-            point_count=ingest.point_count,
-            min_x=ingest.min_x,
-            max_x=ingest.max_x,
-            min_y=ingest.min_y,
-            max_y=ingest.max_y,
-            base_cell_size=settings.base_cell_size,
-            color_field=color,
-            levels=levels,
-            exact_fields=dict(exact_fields),
-            aggregates=aggregates,
-            plot=plot_manifest,
-        )
-        manifest.save(temporary_path)
-
-        if output_path.exists():
-            if output_path.is_dir():
-                shutil.rmtree(output_path)
-            else:
-                output_path.unlink()
-        temporary_path.replace(output_path)
-        report(f"built {output_path} with {manifest.point_count:,} points")
-        return manifest
-    except BaseException:
-        shutil.rmtree(temporary_path, ignore_errors=True)
-        raise
+    axes = plot.axes if plot is not None else AxesManifest()
+    return build_figure_dataset(
+        output,
+        [LayerBuild(batches=batches, x=x, y=y, color=color, plot=plot)],
+        axes=axes,
+        config=config,
+        progress=progress,
+    )

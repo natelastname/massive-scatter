@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
 
-from .builder import BuildConfig, build_dataset
+from .builder import BuildConfig, LayerBuild, build_figure_dataset
 from .source import input_batches
 from .spec import (
     AxesManifest,
@@ -32,13 +33,26 @@ class _ScatterCall:
     size: float | str | FieldValue
     alpha: float | str | FieldValue | CountValue
     label: str | None
+    zorder: float
+
+
+@dataclass(frozen=True, slots=True)
+class ScatterLayer:
+    """Lightweight handle identifying one scatter call in an axes."""
+
+    index: int
+    zorder: float
+
+    @property
+    def id(self) -> str:
+        return f"layer-{self.index:03d}"
 
 
 class Axes:
     """A deliberately small Matplotlib-like single-axes plotting surface."""
 
     def __init__(self) -> None:
-        self._scatter: _ScatterCall | None = None
+        self._scatters: list[_ScatterCall] = []
         self._title: str | None = None
         self._xlabel: str | None = None
         self._ylabel: str | None = None
@@ -57,36 +71,34 @@ class Axes:
         s: float | str | FieldValue = 3.0,
         alpha: float | str | FieldValue | CountValue = 0.92,
         label: str | None = None,
-    ) -> None:
-        """Add the scatter layer for this figure.
+        zorder: float | None = None,
+    ) -> ScatterLayer:
+        """Add an independently stored/queryable scatter layer to this axes."""
 
-        The first grammar version intentionally supports one massive scatter
-        layer. ``c`` maps a numeric source field (or mergeable field expression)
-        to color; use ``color=`` for a constant CSS color. Field-valued marker
-        and size channels apply to exact-point mode. Aggregate LOD always uses
-        spatial square cells.
-        """
-
-        if self._scatter is not None:
-            raise NotImplementedError(
-                "The first plot grammar supports one scatter layer per axes."
-            )
         if c is not None and color is not None:
             raise ValueError(
                 "Pass either c= for a data mapping or color= for a constant."
             )
-        self._scatter = _ScatterCall(
-            source=source,
-            x=x,
-            y=y,
-            c=c,
-            color=color,
-            cmap=cmap,
-            marker=marker,
-            size=s,
-            alpha=alpha,
-            label=label,
+        index = len(self._scatters)
+        selected_zorder = float(index) if zorder is None else float(zorder)
+        if not math.isfinite(selected_zorder):
+            raise ValueError("zorder must be finite")
+        self._scatters.append(
+            _ScatterCall(
+                source=source,
+                x=x,
+                y=y,
+                c=c,
+                color=color,
+                cmap=cmap,
+                marker=marker,
+                size=s,
+                alpha=alpha,
+                label=label,
+                zorder=selected_zorder,
+            )
         )
+        return ScatterLayer(index=index, zorder=selected_zorder)
 
     def set_title(self, value: str) -> None:
         self._title = value
@@ -124,7 +136,7 @@ class Axes:
 
 
 class Figure:
-    """A single interactive massive-scatter figure."""
+    """A single interactive figure containing one axes and many scatter layers."""
 
     def __init__(self, axes: Axes) -> None:
         self.axes = axes
@@ -132,8 +144,6 @@ class Figure:
     @staticmethod
     def _compile(call: _ScatterCall, axes: AxesManifest) -> CompiledPlot:
         if call.color is not None:
-            # compile_encodings treats a string color as a field mapping, so use
-            # a harmless placeholder and replace the resulting color manifest.
             compiled = compile_encodings(
                 x=call.x,
                 y=call.y,
@@ -182,34 +192,42 @@ class Figure:
         config: BuildConfig | None = None,
         progress=None,
     ):
-        call = self.axes._scatter
-        if call is None:
-            raise ValueError("The figure has no scatter layer.")
-        compiled = self._compile(call, self.axes._axes_manifest())
+        if not self.axes._scatters:
+            raise ValueError("The figure has no scatter layers.")
         settings = config or BuildConfig()
-
-        if isinstance(call.source, (str, Path)):
-            batches = input_batches(
-                call.source,
-                columns=list(compiled.required_columns),
-                batch_size=settings.batch_size,
+        axes_manifest = self.axes._axes_manifest()
+        builds: list[LayerBuild] = []
+        for call in self.axes._scatters:
+            compiled = self._compile(call, axes_manifest)
+            if isinstance(call.source, (str, Path)):
+                batches = input_batches(
+                    call.source,
+                    columns=list(compiled.required_columns),
+                    batch_size=settings.batch_size,
+                )
+            else:
+                batches = call.source
+            builds.append(
+                LayerBuild(
+                    batches=batches,
+                    x=call.x,
+                    y=call.y,
+                    plot=compiled,
+                    zorder=call.zorder,
+                )
             )
-        else:
-            batches = call.source
 
-        return build_dataset(
+        return build_figure_dataset(
             output,
-            batches,
-            x=call.x,
-            y=call.y,
+            builds,
+            axes=axes_manifest,
             config=settings,
             progress=progress,
-            plot=compiled,
         )
 
 
 def subplots() -> tuple[Figure, Axes]:
-    """Create the single figure/axes pair supported by the first plot grammar."""
+    """Create the single figure/axes pair supported by the current grammar."""
 
     axes = Axes()
     return Figure(axes), axes

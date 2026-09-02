@@ -27,18 +27,23 @@ image. Its canonical artifact is approximately:
 
 ```text
 example.msplot/
-├── manifest.json          # bounds, int64 origin, plot grammar, LOD metadata
-├── index.parquet          # bounding box and count for each exact-point part
-├── points/
-│   └── part-*.parquet     # exact points and exact-only style fields
-└── lod/
-    ├── 0/
-    │   ├── index.parquet  # coarse bounding boxes for LOD parts
-    │   └── part-*.parquet # one row per occupied cell
-    ├── 1/
+├── manifest.json
+└── layers/
+    ├── layer-000/
+    │   ├── index.parquet
+    │   ├── points/part-*.parquet
+    │   └── lod/
+    │       ├── 0/index.parquet
+    │       ├── 0/part-*.parquet
+    │       └── ...
+    ├── layer-001/
     │   └── ...
     └── ...
 ```
+
+Every scatter call owns one layer directory. Its exact points, spatial index,
+and sparse LOD pyramid are independent of every other layer; only the figure
+bounds, axes, camera, and legend are shared.
 
 The finest numerical LOD begins at `base_cell_size` units per cell (64 by
 default). Below that scale the viewer asks for exact points. Aggregate cells are
@@ -97,8 +102,8 @@ uv run massive-scatter build points.parquet figure.msplot \
   --color support-weight
 ```
 
-The x and y columns must be integer-valued. The direct `--color` column is numeric and uses a `max` reducer at aggregate
-LOD.
+The x and y columns must be integer-valued. The direct `--color` column is
+numeric and uses a `max` reducer at aggregate LOD.
 
 Useful commands:
 
@@ -128,7 +133,7 @@ ms.max(...)
 ms.count()
 ```
 
-A representative figure is:
+A representative multi-layer figure is:
 
 ```python
 import massive_scatter as ms
@@ -136,15 +141,19 @@ import massive_scatter as ms
 fig, ax = ms.subplots()
 
 ax.scatter(
-    "points.parquet",
+    "ew.parquet",
     x="n",
     y="value",
-    c=ms.mean("omega"),
-    cmap="viridis",
-    marker=ms.field("event_type"),
-    s="importance",
-    alpha=ms.count(),
+    color="black",
     label="EW",
+)
+ax.scatter(
+    "toy.parquet",
+    x="n",
+    y="value",
+    color="red",
+    label="Toy EW",
+    zorder=2,
 )
 
 ax.set(
@@ -183,6 +192,7 @@ ax.scatter(
     s=3.0,
     alpha=0.92,
     label=None,
+    zorder=None,
 )
 ```
 
@@ -195,9 +205,10 @@ ax.scatter(
 The iterable form lets generated or streamed data remain bounded-memory instead
 of first materializing the full dataset in Python.
 
-Only one massive scatter layer is currently supported per axes. Calling
-`scatter()` a second time raises `NotImplementedError` rather than silently
-inventing unsupported multi-layer semantics.
+Repeated `scatter()` calls create independent layers on the same axes. Each layer
+keeps its own exact-point store, sparse LOD pyramid, reducers, styling, and exact-vs-
+aggregate decision while sharing the figure camera, axes, and legend. Call order is
+the default z-order; pass `zorder=` to override it.
 
 `c=` and `color=` are mutually exclusive. `c=` means a data mapping; `color=`
 means a constant CSS color.
@@ -215,6 +226,7 @@ means a constant CSS color.
 | `s` | constant or numeric per-point size | deliberately discarded; aggregate geometry is the square bin |
 | `alpha` | constant, numeric field, or `count()` | constant or finalized reducer/count |
 | `label` | layer/legend label | persisted in plot metadata |
+| `zorder` | layer draw order | same layer draw order |
 
 Supported continuous color maps are currently:
 
@@ -265,7 +277,7 @@ ax.scatter(source, x="x", y="y", marker=ms.field("event_type"))
 ```
 
 A non-marker string is also interpreted as a categorical source field. The
-current categorical domain is bounded to at most 32 global values. This keeps
+current categorical domain is bounded to at most 32 values per layer. This keeps
 exact-point marker domains and generated legend entries bounded.
 
 Marker fields do **not** receive an aggregate reducer. Once multiple points have
@@ -430,8 +442,9 @@ manifest = fig.write(
 
 `Figure.write()` compiles the visual grammar into an explicit plot/aggregate
 contract, requests only the source columns required by the figure, streams exact
-points into partitioned Parquet, builds the sparse mergeable LOD pyramid, writes
-the plot metadata to the manifest, and returns the resulting `Manifest`.
+points into per-layer partitioned Parquet, builds each layer's sparse mergeable
+LOD pyramid, writes the figure/layer metadata, and returns the resulting
+`Manifest`.
 
 ### Current API scope and limitations
 
@@ -439,18 +452,17 @@ The first plot grammar intentionally supports:
 
 - one figure;
 - one axes;
-- one massive scatter layer;
+- multiple independently queryable scatter layers on one axes;
 - numeric data-mapped color;
 - constant or categorical exact-point markers;
 - constant or numeric exact-point sizes;
 - numeric/constant/count alpha;
 - `viridis`, `plasma`, and `magma` continuous color maps;
-- categorical exact fields with at most 32 global values.
+- categorical exact fields with at most 32 values per layer.
 
 Not yet implemented:
 
 - multiple subplots;
-- multiple scatter layers;
 - categorical color aggregation;
 - aggregate categorical markers;
 - aggregate marker-size semantics;
@@ -461,10 +473,11 @@ not approximated with arbitrary rules simply to mimic a Matplotlib call shape.
 
 ## `.msplot` schema
 
-The only supported dataset format is schema v3 with
-`lod_storage="sparse_parquet"`. Each LOD stores one row per occupied cell. The
-reader intentionally rejects every other schema version or LOD storage type;
-rebuild source data instead of carrying format-conversion or compatibility code.
+The only supported dataset format is schema v4 with
+`lod_storage="layered_sparse_parquet"`. Every figure stores one or more layer
+directories under `layers/`; each layer has its own exact Parquet parts and sparse
+LOD pyramid. The reader intentionally rejects every other schema version or LOD
+storage type; rebuild source data instead of carrying compatibility code.
 
 The lower-level direct API is:
 
@@ -557,10 +570,11 @@ segmented/BigInt camera state, not merely a different storage type.
 }
 ```
 
-At high zoom the response contains exact points and requested exact style fields
-as offsets from a local origin. If the exact result exceeds the point budget,
-the server selects a sparse Parquet LOD and returns finalized aggregate values
-plus cell counts. No raster image tiles are generated or transferred.
+The response has one shared viewport-local origin plus a `layers` array. Each
+layer independently returns either exact points or sparse aggregate cells, so a
+sparse layer can remain exact while a denser layer in the same viewport moves to
+a coarser LOD. All layer coordinates are rebased into the shared response origin
+before transfer. No raster image tiles are generated or transferred.
 
 ## Development
 
@@ -578,7 +592,8 @@ npm run build
 The reducer tests explicitly verify that aggregate means merge `(sum, count)`
 rather than averaging child means.
 
-Likely future extensions include multiple layers, categorical aggregate
+Likely future extensions include layer visibility controls, shared color
+normalization, categorical aggregate
 histograms/top-k summaries, more visual scales, Arrow IPC or binary HTTP
 responses, approximate mergeable reducers (quantiles/heavy hitters), appendable
 datasets, and parallel LOD construction.
