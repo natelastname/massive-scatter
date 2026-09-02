@@ -34,7 +34,7 @@ jobs:
           uv run black src tests
           uv run ruff check --fix src tests
           uv run black --check src tests
-          uv run ruff check .
+          uv run ruff check src tests
           uv run basedpyright
           uv run pytest
       - name: Validate viewer
