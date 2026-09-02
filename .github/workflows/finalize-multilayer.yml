@@ -1,0 +1,78 @@
+name: Finalize multilayer audit
+
+on:
+  push:
+    branches:
+      - feature/multiple-scatter-layers-20260902
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.head_commit.message == 'Add temporary multilayer audit workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - name: Apply audit fixups
+        run: python .github/finalize_multilayer.py
+      - name: Validate production Python
+        run: |
+          uv sync --locked --all-groups
+          uv run black src tests
+          uv run ruff check --fix src tests
+          uv run black --check src tests
+          uv run ruff check src tests
+          uv run basedpyright
+          uv run pytest
+      - name: Publish audit fixups through GitHub REST API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          repo = os.environ['REPO']
+          branch = os.environ['BRANCH']
+          headers = {
+              'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+
+          def request(method, url, payload=None):
+              req = Request(
+                  url,
+                  data=None if payload is None else json.dumps(payload).encode(),
+                  headers=headers,
+                  method=method,
+              )
+              with urlopen(req) as response:
+                  return json.load(response)
+
+          for path in [
+              'README.md',
+              'src/massive_scatter/manifest.py',
+              'tests/test_manifest.py',
+          ]:
+              url = f'https://api.github.com/repos/{repo}/contents/{quote(path)}'
+              current = request('GET', f'{url}?ref={quote(branch)}')
+              request('PUT', url, {
+                  'message': f'Finalize multilayer audit: {path}',
+                  'content': base64.b64encode(Path(path).read_bytes()).decode(),
+                  'sha': current['sha'],
+                  'branch': branch,
+              })
+          PY
