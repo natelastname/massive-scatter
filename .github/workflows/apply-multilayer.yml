@@ -27,6 +27,7 @@ jobs:
         run: |
           python .github/multilayer_backend_patch.py
           python .github/multilayer_viewer_patch.py
+          python .github/multilayer_fixups.py
       - name: Format and validate Python
         run: |
           uv sync --locked --all-groups
