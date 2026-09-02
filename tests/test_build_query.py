@@ -18,16 +18,13 @@ def test_build_exact_and_aggregate_views(tmp_path):
         output,
         [make_batch(origin)],
         color="weight",
-        config=BuildConfig(
-            base_cell_size=4,
-            part_rows=128,
-            batch_size=64,
-        ),
+        config=BuildConfig(base_cell_size=4, part_rows=128, batch_size=64),
     )
 
     assert manifest.point_count == 1024
     assert manifest.min_x == origin
     assert manifest.width == 1024
+    assert len(manifest.layers) == 1
     dataset = MassiveScatterDataset(output)
     assert dataset.check() == []
 
@@ -40,10 +37,11 @@ def test_build_exact_and_aggregate_views(tmp_path):
         pixel_height=1000,
         max_points=100,
     )
-    assert exact["mode"] == "exact"
     assert exact["origin"] == [100, 0]
-    assert exact["x"] == list(range(11))
-    assert all(isinstance(value, int) for value in exact["x"])
+    layer = exact["layers"][0]
+    assert layer["mode"] == "exact"
+    assert layer["x"] == list(range(11))
+    assert all(isinstance(value, int) for value in layer["x"])
 
     aggregate = dataset.view(
         min_x=0,
@@ -55,12 +53,13 @@ def test_build_exact_and_aggregate_views(tmp_path):
         max_points=10,
         max_cells=64,
     )
-    assert aggregate["mode"] == "aggregate"
-    assert sum(aggregate["count"]) == 1024
-    assert aggregate["cell_count"] <= 64
+    layer = aggregate["layers"][0]
+    assert layer["mode"] == "aggregate"
+    assert sum(layer["count"]) == 1024
+    assert layer["cell_count"] <= 64
 
 
-def test_unit_separation_survives_origin_subtraction(tmp_path):
+def test_unit_separation_survives_shared_origin_rebasing(tmp_path):
     origin = 9_100_000_000_000_000
     batch = pa.record_batch(
         [
@@ -85,6 +84,8 @@ def test_unit_separation_survives_origin_subtraction(tmp_path):
         pixel_height=100,
         max_points=10,
     )
-    assert response["mode"] == "exact"
-    assert response["x"] == [0, 1]
-    assert response["y"] == [0, 1]
+    assert response["origin"] == [0, 0]
+    layer = response["layers"][0]
+    assert layer["mode"] == "exact"
+    assert layer["x"] == [0, 1]
+    assert layer["y"] == [0, 1]
