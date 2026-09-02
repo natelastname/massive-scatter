@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -74,6 +75,8 @@ class LayerManifest:
     def validate(self) -> None:
         if not self.id:
             raise ValueError("Layer ids may not be empty.")
+        if not math.isfinite(self.zorder):
+            raise ValueError("Layer zorder must be finite.")
         pure_path = PurePosixPath(self.path)
         if not self.path or pure_path.is_absolute() or ".." in pure_path.parts:
             raise ValueError("Layer paths must be safe relative paths.")
