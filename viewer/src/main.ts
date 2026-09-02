@@ -55,20 +55,25 @@ interface ScatterManifest {
   label: string | null;
 }
 
+interface AxesManifest {
+  title: string | null;
+  xlabel: string | null;
+  ylabel: string | null;
+  legend: boolean;
+}
+
 interface PlotManifest {
   scatter: ScatterManifest;
-  axes: {
-    title: string | null;
-    xlabel: string | null;
-    ylabel: string | null;
-    legend: boolean;
-  };
+  axes: AxesManifest;
   exact_fields: Record<string, string>;
   categorical_fields: Record<string, string[]>;
   numeric_ranges: Record<string, [number, number]>;
 }
 
-interface Manifest {
+interface LayerManifest {
+  id: string;
+  path: string;
+  zorder: number;
   point_count: number;
   origin: {x: string; y: string};
   extent: {width: number; height: number};
@@ -78,9 +83,18 @@ interface Manifest {
   plot?: PlotManifest;
 }
 
-interface ViewResponse {
+interface Manifest {
+  point_count: number;
+  origin: {x: string; y: string};
+  extent: {width: number; height: number};
+  axes: AxesManifest;
+  layers: LayerManifest[];
+}
+
+interface LayerViewResponse {
+  id: string;
+  zorder: number;
   mode: 'exact' | 'aggregate';
-  origin: [number, number];
   x: number[];
   y: number[];
   color: number[] | null;
@@ -93,7 +107,13 @@ interface ViewResponse {
   level?: number;
 }
 
+interface ViewResponse {
+  origin: [number, number];
+  layers: LayerViewResponse[];
+}
+
 interface PlotDatum {
+  layerId: string;
   position: [number, number];
   legacyValue: number;
   count: number;
@@ -119,7 +139,7 @@ let manifest: Manifest;
 let worldViewState: OrthographicState = {target: [0, 0, 0], zoom: 0};
 let renderOrigin: Origin = [0, 0];
 let currentResponse: ViewResponse | null = null;
-let currentColorRange: [number, number] | null = null;
+const currentColorRanges = new Map<string, NumericRange | null>();
 let requestTimer: number | undefined;
 const viewRequests = new LatestRequestRunner<ViewResponse>();
 const integerFormat = d3format(',');
@@ -145,6 +165,12 @@ function requiredElement<T extends Element>(id: string): T {
   const element = document.getElementById(id);
   if (!element) throw new Error(`Missing #${id}`);
   return element as unknown as T;
+}
+
+function layerManifest(id: string): LayerManifest {
+  const layer = manifest.layers.find(item => item.id === id);
+  if (!layer) throw new Error(`Viewport returned unknown layer ${id}`);
+  return layer;
 }
 
 function visibleBounds() {
@@ -207,7 +233,7 @@ function requestView() {
     },
     response => {
       currentResponse = response;
-      renderLayer(response);
+      renderLayers(response);
     },
     error => {
       status.textContent = `request failed: ${String(error)}`;
@@ -215,9 +241,9 @@ function requestView() {
   );
 }
 
-function responseData(response: ViewResponse): PlotDatum[] {
+function responseData(response: LayerViewResponse): PlotDatum[] {
   const counts = response.count;
-  const legacyValues = response.color ?? counts ?? response.x.map(() => 1);
+  const legacyValues = response.color ?? counts ?? new Array(response.x.length).fill(1);
   const fieldArrays = response.fields ?? {};
   const aggregateArrays = response.aggregates ?? {};
   return response.x.map((x, index) => {
@@ -230,6 +256,7 @@ function responseData(response: ViewResponse): PlotDatum[] {
       aggregateValues[name] = values[index] ?? 0;
     }
     return {
+      layerId: response.id,
       position: [x, response.y[index] ?? 0],
       legacyValue: legacyValues[index] ?? 0,
       count: counts?.[index] ?? 1,
@@ -248,21 +275,22 @@ function encodingValue(encoding: EncodingManifest, datum: PlotDatum, aggregate: 
   return encoding.source ? datum.fields[encoding.source] ?? null : null;
 }
 
-function aggregateDefinition(key: string | undefined): AggregateDefinition | undefined {
+function aggregateDefinition(layer: LayerManifest, key: string | undefined): AggregateDefinition | undefined {
   if (!key) return undefined;
-  return manifest.aggregates?.find(item => item.key === key);
+  return layer.aggregates?.find(item => item.key === key);
 }
 
 function encodingRange(
+  layer: LayerManifest,
   encoding: EncodingManifest,
   data: PlotDatum[],
   aggregate: boolean,
 ): NumericRange {
-  if (!manifest.plot) return finiteRangeBy(data, datum => datum.legacyValue);
+  if (!layer.plot) return finiteRangeBy(data, datum => datum.legacyValue);
   if (encoding.kind === 'constant') return [0, 1];
   if (encoding.kind === 'count') return finiteRangeBy(data, datum => datum.count);
-  const sourceRange = encoding.source ? manifest.plot.numeric_ranges[encoding.source] : undefined;
-  const reducer = aggregateDefinition(encoding.aggregate)?.reducer;
+  const sourceRange = encoding.source ? layer.plot.numeric_ranges[encoding.source] : undefined;
+  const reducer = aggregateDefinition(layer, encoding.aggregate)?.reducer;
   if (sourceRange && (!aggregate || reducer === 'mean' || reducer === 'min' || reducer === 'max')) {
     return sourceRange;
   }
@@ -276,23 +304,24 @@ function encodingRange(
   );
 }
 
-function normalized(value: number, range: [number, number], low = 0, high = 1): number {
+function normalized(value: number, range: NumericRange, low = 0, high = 1): number {
   if (range[0] === range[1]) return high;
   const t = Math.max(0, Math.min(1, (value - range[0]) / (range[1] - range[0])));
   return low + (high - low) * t;
 }
 
 function datumColor(
+  layer: LayerManifest,
   datum: PlotDatum,
   aggregate: boolean,
   colorRange: NumericRange | null,
   alphaRange: NumericRange | null,
 ): RGBA {
-  if (!manifest.plot) {
+  if (!layer.plot) {
     const range = colorRange ?? [0, 1];
     return colorMap(datum.legacyValue, range[0], range[1]);
   }
-  const scatter = manifest.plot.scatter;
+  const scatter = layer.plot.scatter;
   let color: RGBA;
   if (scatter.color.kind === 'constant') {
     color = parseColor(String(scatter.color.value ?? 'black'));
@@ -313,20 +342,20 @@ function datumColor(
   return withAlpha(color, normalized(rawAlpha, alphaRange ?? [0, 1], 0.15, 1));
 }
 
-function datumMarker(datum: PlotDatum): string {
-  if (!manifest.plot) return 'circle';
-  const encoding = manifest.plot.scatter.marker;
+function datumMarker(layer: LayerManifest, datum: PlotDatum): string {
+  if (!layer.plot) return 'circle';
+  const encoding = layer.plot.scatter.marker;
   if (encoding.kind === 'constant') return String(encoding.value ?? 'circle');
   if (encoding.kind !== 'field' || !encoding.source) return 'circle';
   const value = String(datum.fields[encoding.source] ?? '');
-  const categories = manifest.plot.categorical_fields[encoding.source] ?? [];
+  const categories = layer.plot.categorical_fields[encoding.source] ?? [];
   const index = Math.max(0, categories.indexOf(value));
   return markerForCategory(index);
 }
 
-function datumSize(datum: PlotDatum): number {
-  if (!manifest.plot) return 3;
-  const encoding = manifest.plot.scatter.size;
+function datumSize(layer: LayerManifest, datum: PlotDatum): number {
+  if (!layer.plot) return 3;
+  const encoding = layer.plot.scatter.size;
   if (encoding.kind === 'constant') {
     const value = Number(encoding.value ?? 3);
     return Number.isFinite(value) ? Math.max(2, value) : 3;
@@ -334,152 +363,190 @@ function datumSize(datum: PlotDatum): number {
   if (encoding.kind !== 'field' || !encoding.source) return 3;
   const raw = datum.fields[encoding.source];
   if (typeof raw !== 'number') return 3;
-  const range = manifest.plot.numeric_ranges[encoding.source] ?? [raw, raw];
+  const range = layer.plot.numeric_ranges[encoding.source] ?? [raw, raw];
   return normalized(raw, range, 3, 14);
 }
 
-function renderLayer(response: ViewResponse) {
+function makeDeckLayer(response: LayerViewResponse) {
+  const layer = layerManifest(response.id);
   const data = responseData(response);
   const aggregate = response.mode === 'aggregate';
   let colorRange: NumericRange | null;
   let alphaRange: NumericRange | null = null;
-  if (!manifest.plot) {
+  if (!layer.plot) {
     colorRange = finiteRangeBy(data, datum => datum.legacyValue);
   } else {
-    const scatter = manifest.plot.scatter;
-    colorRange = scatter.color.kind === 'constant' ? null : encodingRange(scatter.color, data, aggregate);
+    const scatter = layer.plot.scatter;
+    colorRange = scatter.color.kind === 'constant' ? null : encodingRange(layer, scatter.color, data, aggregate);
     if (scatter.alpha.kind !== 'constant') {
-      alphaRange = encodingRange(scatter.alpha, data, aggregate);
+      alphaRange = encodingRange(layer, scatter.alpha, data, aggregate);
     }
   }
-  currentColorRange = colorRange;
+  currentColorRanges.set(layer.id, colorRange);
+
+  if (aggregate) {
+    return new GridCellLayer<PlotDatum>({
+      id: `cells-${layer.id}-${response.level ?? 'aggregate'}`,
+      data,
+      coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+      cellSize: response.cell_size ?? 1,
+      coverage: 1,
+      extruded: false,
+      getPosition: datum => aggregateCellCorner(datum.position, response.cell_size ?? 1),
+      getFillColor: datum => datumColor(layer, datum, true, colorRange, alphaRange),
+      opacity: 1,
+      pickable: true,
+    });
+  }
+  if (layer.plot) {
+    return new IconLayer<PlotDatum>({
+      id: `points-styled-${layer.id}`,
+      data,
+      coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+      getPosition: datum => datum.position,
+      getIcon: datum => markerIcon(datumMarker(layer, datum)),
+      getSize: datum => datumSize(layer, datum),
+      sizeUnits: 'pixels',
+      sizeMinPixels: 2,
+      sizeMaxPixels: 24,
+      getColor: datum => datumColor(layer, datum, false, colorRange, alphaRange),
+      pickable: true,
+    });
+  }
+  return new ScatterplotLayer<PlotDatum>({
+    id: `points-native-${layer.id}`,
+    data,
+    coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+    getPosition: datum => datum.position,
+    getRadius: 0.42,
+    radiusUnits: 'common',
+    radiusMinPixels: 1.35,
+    radiusMaxPixels: 5,
+    getFillColor: datum => datumColor(layer, datum, false, colorRange, alphaRange),
+    opacity: 0.92,
+    stroked: false,
+    pickable: true,
+  });
+}
+
+function renderLayers(response: ViewResponse) {
+  currentColorRanges.clear();
   renderOrigin = response.origin;
   const renderViewState = toRenderViewState(worldViewState, renderOrigin);
-
-  const layer = aggregate
-    ? new GridCellLayer<PlotDatum>({
-        id: `cells-${response.level ?? 'aggregate'}`,
-        data,
-        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-        cellSize: response.cell_size ?? 1,
-        coverage: 1,
-        extruded: false,
-        getPosition: datum => aggregateCellCorner(datum.position, response.cell_size ?? 1),
-        getFillColor: datum => datumColor(datum, true, colorRange, alphaRange),
-        opacity: 1,
-        pickable: true,
-      })
-    : manifest.plot
-      ? new IconLayer<PlotDatum>({
-          id: 'points-styled',
-          data,
-          coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-          getPosition: datum => datum.position,
-          getIcon: datum => markerIcon(datumMarker(datum)),
-          getSize: datum => datumSize(datum),
-          sizeUnits: 'pixels',
-          sizeMinPixels: 2,
-          sizeMaxPixels: 24,
-          getColor: datum => datumColor(datum, false, colorRange, alphaRange),
-          pickable: true,
-        })
-      : new ScatterplotLayer<PlotDatum>({
-          id: 'points-native',
-          data,
-          coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-          getPosition: datum => datum.position,
-          getRadius: 0.42,
-          radiusUnits: 'common',
-          radiusMinPixels: 1.35,
-          radiusMaxPixels: 5,
-          getFillColor: datum => datumColor(datum, false, colorRange, alphaRange),
-          opacity: 0.92,
-          stroked: false,
-          pickable: true,
-        });
-
-  deck.setProps({viewState: renderViewState, layers: [layer]});
+  const deckLayers = response.layers.map(makeDeckLayer);
+  deck.setProps({viewState: renderViewState, layers: deckLayers});
   renderLegend();
 
-  const rendered = data.length;
-  status.textContent = aggregate
-    ? `LOD ${response.level} · ${integerFormat(rendered)} occupied cells · ${integerFormat(response.cell_size ?? 1)} units/cell`
-    : `exact · ${integerFormat(rendered)} points · viewport-local GPU coordinates`;
+  let rendered = 0;
+  let exactLayers = 0;
+  let aggregateLayers = 0;
+  for (const layer of response.layers) {
+    rendered += layer.mode === 'exact' ? layer.point_count ?? layer.x.length : layer.cell_count ?? layer.x.length;
+    if (layer.mode === 'exact') exactLayers += 1;
+    else aggregateLayers += 1;
+  }
+  status.textContent = `${integerFormat(response.layers.length)} layers · ${integerFormat(rendered)} rendered objects · ${exactLayers} exact / ${aggregateLayers} aggregate`;
+}
+
+function orderedManifestLayers(): LayerManifest[] {
+  return manifest.layers
+    .map((layer, index) => ({layer, index}))
+    .sort((a, b) => a.layer.zorder - b.layer.zorder || a.index - b.index)
+    .map(item => item.layer);
+}
+
+function appendLayerLabel(scatter: ScatterManifest) {
+  if (!scatter.label) return;
+  const row = document.createElement('div');
+  row.className = 'legend-row';
+  if (scatter.color.kind === 'constant') {
+    const swatch = document.createElement('span');
+    swatch.className = 'color-swatch';
+    swatch.style.background = String(scatter.color.value ?? 'black');
+    row.append(swatch);
+  }
+  row.append(document.createTextNode(scatter.label));
+  legend.append(row);
 }
 
 function renderLegend() {
   legend.replaceChildren();
-  const plotManifest = manifest.plot;
-  if (!plotManifest?.axes.legend) {
+  if (!manifest.axes.legend) {
     legend.hidden = true;
     return;
   }
   legend.hidden = false;
-  const scatter = plotManifest.scatter;
 
-  if (scatter.label) {
-    const heading = document.createElement('div');
-    heading.className = 'legend-heading';
-    heading.textContent = scatter.label;
-    legend.append(heading);
-  }
+  for (const layer of orderedManifestLayers()) {
+    const plotManifest = layer.plot;
+    if (!plotManifest?.scatter.label) continue;
+    const scatter = plotManifest.scatter;
+    appendLayerLabel(scatter);
 
-  if (scatter.marker.kind === 'field' && scatter.marker.source) {
-    const source = scatter.marker.source;
-    const categories = plotManifest.categorical_fields[source] ?? [];
-    for (const [index, category] of categories.entries()) {
-      const row = document.createElement('div');
-      row.className = 'legend-row';
-      const swatch = document.createElement('span');
-      swatch.className = 'marker-swatch';
-      const icon = markerIcon(markerForCategory(index));
-      swatch.style.maskImage = `url("${icon.url}")`;
-      swatch.style.webkitMaskImage = `url("${icon.url}")`;
-      row.append(swatch, document.createTextNode(category));
-      legend.append(row);
+    if (scatter.marker.kind === 'field' && scatter.marker.source) {
+      const source = scatter.marker.source;
+      const categories = plotManifest.categorical_fields[source] ?? [];
+      for (const [index, category] of categories.entries()) {
+        const row = document.createElement('div');
+        row.className = 'legend-row';
+        const swatch = document.createElement('span');
+        swatch.className = 'marker-swatch';
+        const icon = markerIcon(markerForCategory(index));
+        swatch.style.maskImage = `url("${icon.url}")`;
+        swatch.style.webkitMaskImage = `url("${icon.url}")`;
+        row.append(swatch, document.createTextNode(category));
+        legend.append(row);
+      }
     }
-  }
 
-  if (scatter.color.kind !== 'constant') {
-    const label = document.createElement('div');
-    label.className = 'legend-color-label';
-    if (scatter.color.kind === 'count') {
-      label.textContent = 'count';
-    } else {
-      const definition = aggregateDefinition(scatter.color.aggregate);
-      label.textContent = definition
-        ? `${definition.reducer}(${definition.source})`
-        : scatter.color.source ?? 'color';
+    if (scatter.color.kind !== 'constant') {
+      const label = document.createElement('div');
+      label.className = 'legend-color-label';
+      if (scatter.color.kind === 'count') {
+        label.textContent = `${scatter.label}: count`;
+      } else {
+        const definition = aggregateDefinition(layer, scatter.color.aggregate);
+        const valueLabel = definition
+          ? `${definition.reducer}(${definition.source})`
+          : scatter.color.source ?? 'color';
+        label.textContent = `${scatter.label}: ${valueLabel}`;
+      }
+      const strip = document.createElement('div');
+      strip.className = 'legend-gradient';
+      strip.style.backgroundImage = gradientCss(scatter.cmap);
+      const ticks = document.createElement('div');
+      ticks.className = 'legend-gradient-ticks';
+      const range = currentColorRanges.get(layer.id);
+      ticks.innerHTML = range
+        ? `<span>${escapeHtml(compactFormat(range[0]))}</span><span>${escapeHtml(compactFormat(range[1]))}</span>`
+        : '';
+      legend.append(label, strip, ticks);
     }
-    const strip = document.createElement('div');
-    strip.className = 'legend-gradient';
-    strip.style.backgroundImage = gradientCss(scatter.cmap);
-    const ticks = document.createElement('div');
-    ticks.className = 'legend-gradient-ticks';
-    const range = currentColorRange;
-    ticks.innerHTML = range
-      ? `<span>${escapeHtml(compactFormat(range[0]))}</span><span>${escapeHtml(compactFormat(range[1]))}</span>`
-      : '';
-    legend.append(label, strip, ticks);
   }
 }
 
 function tooltip(info: PickingInfo<PlotDatum>) {
   if (!manifest || !currentResponse || !info.object) return null;
+  const layer = layerManifest(info.object.layerId);
+  const layerResponse = currentResponse.layers.find(item => item.id === layer.id);
+  if (!layerResponse) return null;
   const [relativeX, relativeY] = localToWorld(renderOrigin, info.object.position);
   const absoluteX = addIntegerOffset(manifest.origin.x, relativeX);
   const absoluteY = addIntegerOffset(manifest.origin.y, relativeY);
-  const lines = [`x: ${escapeHtml(absoluteX)}`, `y: ${escapeHtml(absoluteY)}`];
+  const lines: string[] = [];
+  const label = layer.plot?.scatter.label;
+  if (label) lines.push(escapeHtml(label));
+  lines.push(`x: ${escapeHtml(absoluteX)}`, `y: ${escapeHtml(absoluteY)}`);
 
-  if (currentResponse.mode === 'aggregate') {
+  if (layerResponse.mode === 'aggregate') {
     lines.push(`count: ${integerFormat(info.object.count)}`);
-    for (const definition of manifest.aggregates ?? []) {
+    for (const definition of layer.aggregates ?? []) {
       const value = info.object.aggregates[definition.key];
       if (value !== undefined) {
         lines.push(`${escapeHtml(definition.reducer)}(${escapeHtml(definition.source)}): ${escapeHtml(compactFormat(value))}`);
       }
     }
-  } else if (manifest.plot) {
+  } else if (layer.plot) {
     for (const [name, value] of Object.entries(info.object.fields)) {
       lines.push(`${escapeHtml(name)}: ${escapeHtml(String(value))}`);
     }
@@ -525,12 +592,11 @@ function renderAxes() {
     appendText(AXIS_LEFT - 9, y + 4, addIntegerOffset(manifest.origin.y, tick), 'end', 'tick-label');
   }
 
-  const axesManifest = manifest.plot?.axes;
-  if (axesManifest?.xlabel) {
-    appendText((AXIS_LEFT + width - AXIS_RIGHT) / 2, height - 6, axesManifest.xlabel, 'middle', 'axis-label');
+  if (manifest.axes.xlabel) {
+    appendText((AXIS_LEFT + width - AXIS_RIGHT) / 2, height - 6, manifest.axes.xlabel, 'middle', 'axis-label');
   }
-  if (axesManifest?.ylabel) {
-    const text = appendText(15, (AXIS_TOP + height - AXIS_BOTTOM) / 2, axesManifest.ylabel, 'middle', 'axis-label');
+  if (manifest.axes.ylabel) {
+    const text = appendText(15, (AXIS_TOP + height - AXIS_BOTTOM) / 2, manifest.axes.ylabel, 'middle', 'axis-label');
     text.setAttribute('transform', `rotate(-90 15 ${(AXIS_TOP + height - AXIS_BOTTOM) / 2})`);
   }
 }
@@ -576,10 +642,10 @@ async function start() {
   const response = await fetch('/api/manifest');
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
   manifest = (await response.json()) as Manifest;
-  const title = manifest.plot?.axes.title ?? 'massive-scatter';
+  const title = manifest.axes.title ?? 'massive-scatter';
   figureTitle.textContent = title;
   document.title = title;
-  summary.textContent = `${integerFormat(manifest.point_count)} points · ${integerFormat(manifest.extent.width)} × ${integerFormat(manifest.extent.height)} units`;
+  summary.textContent = `${integerFormat(manifest.point_count)} points · ${integerFormat(manifest.layers.length)} layers · ${integerFormat(manifest.extent.width)} × ${integerFormat(manifest.extent.height)} units`;
   renderLegend();
   goHome();
 }
