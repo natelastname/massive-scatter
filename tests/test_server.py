@@ -12,7 +12,14 @@ def test_api_serves_layered_manifest_and_view(tmp_path):
         [pa.record_batch([[0, 1, 2], [2, 1, 0]], names=["x", "y"])],
         config=BuildConfig(base_cell_size=1, part_rows=4),
     )
-    client = TestClient(create_app(output))
+
+    # Exercise the production routing shape where a root StaticFiles mount is
+    # present. Without an explicit GET /api/view route, that catch-all turns the
+    # intended 405 method error into a misleading 404.
+    viewer = tmp_path / "viewer"
+    viewer.mkdir()
+    (viewer / "index.html").write_text("<!doctype html><title>test</title>")
+    client = TestClient(create_app(output, viewer_dir=viewer))
 
     manifest = client.get("/api/manifest")
     assert manifest.status_code == 200
@@ -36,4 +43,7 @@ def test_api_serves_layered_manifest_and_view(tmp_path):
     assert response["origin"] == [0, 0]
     assert response["layers"][0]["mode"] == "exact"
     assert response["layers"][0]["point_count"] == 3
-    assert client.get("/api/view").status_code == 405
+
+    wrong_method = client.get("/api/view")
+    assert wrong_method.status_code == 405
+    assert wrong_method.headers["allow"] == "POST"
