@@ -5,7 +5,7 @@ from massive_scatter import BuildConfig, build_dataset
 from massive_scatter.server import create_app
 
 
-def test_api_serves_manifest_and_view(tmp_path):
+def test_api_serves_layered_manifest_and_view(tmp_path):
     output = tmp_path / "api.msplot"
     build_dataset(
         output,
@@ -16,7 +16,9 @@ def test_api_serves_manifest_and_view(tmp_path):
 
     manifest = client.get("/api/manifest")
     assert manifest.status_code == 200
-    assert manifest.json()["point_count"] == 3
+    payload = manifest.json()
+    assert payload["point_count"] == 3
+    assert [layer["id"] for layer in payload["layers"]] == ["layer-000"]
 
     view = client.post(
         "/api/view",
@@ -30,6 +32,8 @@ def test_api_serves_manifest_and_view(tmp_path):
         },
     )
     assert view.status_code == 200
-    assert view.json()["mode"] == "exact"
-    assert view.json()["point_count"] == 3
+    response = view.json()
+    assert response["origin"] == [0, 0]
+    assert response["layers"][0]["mode"] == "exact"
+    assert response["layers"][0]["point_count"] == 3
     assert client.get("/api/view").status_code == 405
