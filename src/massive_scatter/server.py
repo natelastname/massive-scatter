@@ -71,6 +71,17 @@ def create_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
+    @app.get("/api/view", include_in_schema=False)
+    def view_requires_post() -> None:
+        # A root StaticFiles mount otherwise turns this method mismatch into a
+        # 404 whenever built viewer assets are present. Keep the API contract
+        # independent of whether the frontend happens to be installed.
+        raise HTTPException(
+            status_code=405,
+            detail="Method Not Allowed",
+            headers={"Allow": "POST"},
+        )
+
     static_dir = _find_viewer(viewer_dir)
     if static_dir is not None:
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="viewer")
