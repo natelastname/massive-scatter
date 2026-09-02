@@ -8,16 +8,16 @@ import numpy as np
 import pyarrow.dataset as pads
 import pyarrow.parquet as pq
 
-from .manifest import Manifest
+from .manifest import LayerManifest, Manifest
 from .sparse_dataset import SparseLodReader
 
 
-class MassiveScatterDataset:
-    """Query exact points or bounded sparse-Parquet LOD summaries."""
+class _LayerDataset:
+    """Query one layer in its own origin-relative coordinate system."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path).expanduser().resolve()
-        self.manifest = Manifest.load(self.path)
+    def __init__(self, path: Path, manifest: LayerManifest) -> None:
+        self.path = path
+        self.manifest = manifest
         self._parts = pq.read_table(self.path / "index.parquet").to_pylist()
         self._lod = SparseLodReader(self.path, self.manifest)
 
@@ -135,19 +135,9 @@ class MassiveScatterDataset:
         max_y: float,
         pixel_width: int,
         pixel_height: int,
-        max_points: int = 200_000,
-        max_cells: int = 200_000,
+        max_points: int,
+        max_cells: int,
     ) -> dict[str, Any]:
-        values = (min_x, max_x, min_y, max_y)
-        if not all(math.isfinite(value) for value in values):
-            raise ValueError("Viewport bounds must be finite.")
-        if min_x > max_x or min_y > max_y:
-            raise ValueError("Viewport bounds are inverted.")
-        if pixel_width < 1 or pixel_height < 1:
-            raise ValueError("Viewport pixel dimensions must be positive.")
-        if max_points < 1 or max_cells < 1:
-            raise ValueError("max_points and max_cells must be positive.")
-
         clipped_min_x = max(0.0, min_x)
         clipped_max_x = min(float(self.manifest.width - 1), max_x)
         clipped_min_y = max(0.0, min_y)
@@ -210,6 +200,87 @@ class MassiveScatterDataset:
             path = self.path / str(part["path"])
             if not path.is_file():
                 problems.append(f"missing point part: {part['path']}")
-
         problems.extend(self._lod.check())
+        return problems
+
+
+class MassiveScatterDataset:
+    """Query all figure layers against one shared viewport and camera origin."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser().resolve()
+        self.manifest = Manifest.load(self.path)
+        indexed = [
+            (index, _LayerDataset(self.path / layer.path, layer))
+            for index, layer in enumerate(self.manifest.layers)
+        ]
+        self._layers = [
+            dataset
+            for _, dataset in sorted(
+                indexed, key=lambda item: (item[1].manifest.zorder, item[0])
+            )
+        ]
+
+    def view(
+        self,
+        *,
+        min_x: float,
+        max_x: float,
+        min_y: float,
+        max_y: float,
+        pixel_width: int,
+        pixel_height: int,
+        max_points: int = 200_000,
+        max_cells: int = 200_000,
+    ) -> dict[str, Any]:
+        values = (min_x, max_x, min_y, max_y)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Viewport bounds must be finite.")
+        if min_x > max_x or min_y > max_y:
+            raise ValueError("Viewport bounds are inverted.")
+        if pixel_width < 1 or pixel_height < 1:
+            raise ValueError("Viewport pixel dimensions must be positive.")
+        if max_points < 1 or max_cells < 1:
+            raise ValueError("max_points and max_cells must be positive.")
+
+        clipped_min_x = max(0.0, min_x)
+        clipped_max_x = min(float(self.manifest.width - 1), max_x)
+        clipped_min_y = max(0.0, min_y)
+        clipped_max_y = min(float(self.manifest.height - 1), max_y)
+        origin_x = math.floor(clipped_min_x)
+        origin_y = math.floor(clipped_min_y)
+        if clipped_min_x > clipped_max_x or clipped_min_y > clipped_max_y:
+            return {"origin": [origin_x, origin_y], "layers": []}
+
+        layer_responses: list[dict[str, Any]] = []
+        for dataset in self._layers:
+            layer = dataset.manifest
+            layer_offset_x = layer.min_x - self.manifest.min_x
+            layer_offset_y = layer.min_y - self.manifest.min_y
+            response = dataset.view(
+                min_x=clipped_min_x - layer_offset_x,
+                max_x=clipped_max_x - layer_offset_x,
+                min_y=clipped_min_y - layer_offset_y,
+                max_y=clipped_max_y - layer_offset_y,
+                pixel_width=pixel_width,
+                pixel_height=pixel_height,
+                max_points=max_points,
+                max_cells=max_cells,
+            )
+            child_origin_x, child_origin_y = response.pop("origin")
+            shift_x = child_origin_x + layer_offset_x - origin_x
+            shift_y = child_origin_y + layer_offset_y - origin_y
+            response["x"] = [value + shift_x for value in response["x"]]
+            response["y"] = [value + shift_y for value in response["y"]]
+            response["id"] = layer.id
+            response["zorder"] = layer.zorder
+            layer_responses.append(response)
+
+        return {"origin": [origin_x, origin_y], "layers": layer_responses}
+
+    def check(self) -> list[str]:
+        problems: list[str] = []
+        for dataset in self._layers:
+            for problem in dataset.check():
+                problems.append(f"{dataset.manifest.id}: {problem}")
         return problems
