@@ -128,7 +128,7 @@ ms.max(...)
 ms.count()
 ```
 
-A representative figure is:
+A representative multi-layer figure is:
 
 ```python
 import massive_scatter as ms
@@ -136,15 +136,19 @@ import massive_scatter as ms
 fig, ax = ms.subplots()
 
 ax.scatter(
-    "points.parquet",
+    "ew.parquet",
     x="n",
     y="value",
-    c=ms.mean("omega"),
-    cmap="viridis",
-    marker=ms.field("event_type"),
-    s="importance",
-    alpha=ms.count(),
+    color="black",
     label="EW",
+)
+ax.scatter(
+    "toy.parquet",
+    x="n",
+    y="value",
+    color="red",
+    label="Toy EW",
+    zorder=2,
 )
 
 ax.set(
@@ -195,9 +199,10 @@ ax.scatter(
 The iterable form lets generated or streamed data remain bounded-memory instead
 of first materializing the full dataset in Python.
 
-Only one massive scatter layer is currently supported per axes. Calling
-`scatter()` a second time raises `NotImplementedError` rather than silently
-inventing unsupported multi-layer semantics.
+Repeated `scatter()` calls create independent layers on the same axes. Each layer
+keeps its own exact-point store, sparse LOD pyramid, reducers, styling, and exact-vs-
+aggregate decision while sharing the figure camera, axes, and legend. Call order is
+the default z-order; pass `zorder=` to override it.
 
 `c=` and `color=` are mutually exclusive. `c=` means a data mapping; `color=`
 means a constant CSS color.
@@ -439,7 +444,7 @@ The first plot grammar intentionally supports:
 
 - one figure;
 - one axes;
-- one massive scatter layer;
+- multiple independently queryable scatter layers on one axes;
 - numeric data-mapped color;
 - constant or categorical exact-point markers;
 - constant or numeric exact-point sizes;
@@ -450,7 +455,6 @@ The first plot grammar intentionally supports:
 Not yet implemented:
 
 - multiple subplots;
-- multiple scatter layers;
 - categorical color aggregation;
 - aggregate categorical markers;
 - aggregate marker-size semantics;
@@ -461,10 +465,11 @@ not approximated with arbitrary rules simply to mimic a Matplotlib call shape.
 
 ## `.msplot` schema
 
-The only supported dataset format is schema v3 with
-`lod_storage="sparse_parquet"`. Each LOD stores one row per occupied cell. The
-reader intentionally rejects every other schema version or LOD storage type;
-rebuild source data instead of carrying format-conversion or compatibility code.
+The only supported dataset format is schema v4 with
+`lod_storage="layered_sparse_parquet"`. Every figure stores one or more layer
+directories under `layers/`; each layer has its own exact Parquet parts and sparse
+LOD pyramid. The reader intentionally rejects every other schema version or LOD
+storage type; rebuild source data instead of carrying compatibility code.
 
 The lower-level direct API is:
 
