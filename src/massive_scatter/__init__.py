@@ -3,7 +3,7 @@
 from .builder import BuildConfig, build_dataset
 from .dataset import MassiveScatterDataset
 from .manifest import Manifest
-from .plot import Axes, Figure, subplots
+from .plot import Axes, Figure, ScatterLayer, subplots
 from .spec import (
     AggregatePlan,
     CountValue,
@@ -23,6 +23,7 @@ __all__ = [
     "CountValue",
     "FieldValue",
     "Figure",
+    "ScatterLayer",
     "Manifest",
     "MassiveScatterDataset",
     "build_dataset",
