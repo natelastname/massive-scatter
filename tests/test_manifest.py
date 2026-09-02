@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from massive_scatter.manifest import (
@@ -67,6 +69,11 @@ def test_manifest_rejects_non_layered_storage():
     payload["lod_storage"] = "sparse_parquet"
     with pytest.raises(ValueError, match="layered_sparse_parquet"):
         Manifest.from_dict(payload)
+
+
+def test_layer_manifest_rejects_nonfinite_zorder():
+    with pytest.raises(ValueError, match="zorder must be finite"):
+        replace(_layer(), zorder=float("nan")).validate()
 
 
 def test_manifest_requires_unique_layer_ids_and_union_bounds():
