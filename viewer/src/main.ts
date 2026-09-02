@@ -15,6 +15,7 @@ import {
   type OrthographicState,
 } from './frame';
 import {aggregateCellCorner} from './lod-cell';
+import {finiteRangeBy, type NumericRange} from './range';
 import {LatestRequestRunner} from './latest-request';
 import {createPlotView} from './plot-view';
 import {
@@ -247,26 +248,6 @@ function encodingValue(encoding: EncodingManifest, datum: PlotDatum, aggregate: 
   return encoding.source ? datum.fields[encoding.source] ?? null : null;
 }
 
-function numericValues(encoding: EncodingManifest, data: PlotDatum[], aggregate: boolean): number[] {
-  const result: number[] = [];
-  for (const datum of data) {
-    const value = encodingValue(encoding, datum, aggregate);
-    if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
-  }
-  return result;
-}
-
-function finiteRange(values: number[], fallback: [number, number] = [0, 1]): [number, number] {
-  if (values.length === 0) return fallback;
-  let minimum = Infinity;
-  let maximum = -Infinity;
-  for (const value of values) {
-    minimum = Math.min(minimum, value);
-    maximum = Math.max(maximum, value);
-  }
-  return [minimum, maximum];
-}
-
 function aggregateDefinition(key: string | undefined): AggregateDefinition | undefined {
   if (!key) return undefined;
   return manifest.aggregates?.find(item => item.key === key);
@@ -276,16 +257,23 @@ function encodingRange(
   encoding: EncodingManifest,
   data: PlotDatum[],
   aggregate: boolean,
-): [number, number] {
-  if (!manifest.plot) return finiteRange(data.map(datum => datum.legacyValue));
+): NumericRange {
+  if (!manifest.plot) return finiteRangeBy(data, datum => datum.legacyValue);
   if (encoding.kind === 'constant') return [0, 1];
-  if (encoding.kind === 'count') return finiteRange(data.map(datum => datum.count));
+  if (encoding.kind === 'count') return finiteRangeBy(data, datum => datum.count);
   const sourceRange = encoding.source ? manifest.plot.numeric_ranges[encoding.source] : undefined;
   const reducer = aggregateDefinition(encoding.aggregate)?.reducer;
   if (sourceRange && (!aggregate || reducer === 'mean' || reducer === 'min' || reducer === 'max')) {
     return sourceRange;
   }
-  return finiteRange(numericValues(encoding, data, aggregate), sourceRange ?? [0, 1]);
+  return finiteRangeBy(
+    data,
+    datum => {
+      const value = encodingValue(encoding, datum, aggregate);
+      return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    },
+    sourceRange ?? [0, 1],
+  );
 }
 
 function normalized(value: number, range: [number, number], low = 0, high = 1): number {
@@ -294,19 +282,22 @@ function normalized(value: number, range: [number, number], low = 0, high = 1): 
   return low + (high - low) * t;
 }
 
-function datumColor(datum: PlotDatum, data: PlotDatum[], aggregate: boolean): RGBA {
+function datumColor(
+  datum: PlotDatum,
+  aggregate: boolean,
+  colorRange: NumericRange | null,
+  alphaRange: NumericRange | null,
+): RGBA {
   if (!manifest.plot) {
-    const range = finiteRange(data.map(item => item.legacyValue));
+    const range = colorRange ?? [0, 1];
     return colorMap(datum.legacyValue, range[0], range[1]);
   }
   const scatter = manifest.plot.scatter;
   let color: RGBA;
   if (scatter.color.kind === 'constant') {
     color = parseColor(String(scatter.color.value ?? 'black'));
-    currentColorRange = null;
   } else {
-    const range = encodingRange(scatter.color, data, aggregate);
-    currentColorRange = range;
+    const range = colorRange ?? [0, 1];
     const raw = encodingValue(scatter.color, datum, aggregate);
     const value = typeof raw === 'number' ? raw : range[0];
     color = colorMap(value, range[0], range[1], scatter.cmap);
@@ -319,8 +310,7 @@ function datumColor(datum: PlotDatum, data: PlotDatum[], aggregate: boolean): RG
   }
   const rawAlpha = encodingValue(alphaEncoding, datum, aggregate);
   if (typeof rawAlpha !== 'number') return color;
-  const alphaRange = encodingRange(alphaEncoding, data, aggregate);
-  return withAlpha(color, normalized(rawAlpha, alphaRange, 0.15, 1));
+  return withAlpha(color, normalized(rawAlpha, alphaRange ?? [0, 1], 0.15, 1));
 }
 
 function datumMarker(datum: PlotDatum): string {
@@ -351,11 +341,18 @@ function datumSize(datum: PlotDatum): number {
 function renderLayer(response: ViewResponse) {
   const data = responseData(response);
   const aggregate = response.mode === 'aggregate';
-  if (manifest.plot?.scatter.color.kind === 'constant') {
-    currentColorRange = null;
-  } else if (manifest.plot) {
-    currentColorRange = encodingRange(manifest.plot.scatter.color, data, aggregate);
+  let colorRange: NumericRange | null;
+  let alphaRange: NumericRange | null = null;
+  if (!manifest.plot) {
+    colorRange = finiteRangeBy(data, datum => datum.legacyValue);
+  } else {
+    const scatter = manifest.plot.scatter;
+    colorRange = scatter.color.kind === 'constant' ? null : encodingRange(scatter.color, data, aggregate);
+    if (scatter.alpha.kind !== 'constant') {
+      alphaRange = encodingRange(scatter.alpha, data, aggregate);
+    }
   }
+  currentColorRange = colorRange;
   renderOrigin = response.origin;
   const renderViewState = toRenderViewState(worldViewState, renderOrigin);
 
@@ -368,7 +365,7 @@ function renderLayer(response: ViewResponse) {
         coverage: 1,
         extruded: false,
         getPosition: datum => aggregateCellCorner(datum.position, response.cell_size ?? 1),
-        getFillColor: datum => datumColor(datum, data, true),
+        getFillColor: datum => datumColor(datum, true, colorRange, alphaRange),
         opacity: 1,
         pickable: true,
       })
@@ -383,7 +380,7 @@ function renderLayer(response: ViewResponse) {
           sizeUnits: 'pixels',
           sizeMinPixels: 2,
           sizeMaxPixels: 24,
-          getColor: datum => datumColor(datum, data, false),
+          getColor: datum => datumColor(datum, false, colorRange, alphaRange),
           pickable: true,
         })
       : new ScatterplotLayer<PlotDatum>({
@@ -395,7 +392,7 @@ function renderLayer(response: ViewResponse) {
           radiusUnits: 'common',
           radiusMinPixels: 1.35,
           radiusMaxPixels: 5,
-          getFillColor: datum => datumColor(datum, data, false),
+          getFillColor: datum => datumColor(datum, false, colorRange, alphaRange),
           opacity: 0.92,
           stroked: false,
           pickable: true,
