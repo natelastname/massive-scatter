@@ -16,19 +16,17 @@ def test_extreme_aspect_ratio_uses_sparse_cell_rows(tmp_path):
     manifest = build_dataset(
         output,
         [batch],
-        config=BuildConfig(
-            base_cell_size=64,
-            part_rows=2048,
-            batch_size=1024,
-        ),
+        config=BuildConfig(base_cell_size=64, part_rows=2048, batch_size=1024),
     )
 
-    assert manifest.schema_version == 3
-    assert manifest.lod_storage == "sparse_parquet"
-    assert manifest.levels[0].occupied_cells == point_count
-    assert (output / "lod" / "0" / "index.parquet").is_file()
+    assert manifest.schema_version == 4
+    assert manifest.lod_storage == "layered_sparse_parquet"
+    layer = manifest.layers[0]
+    assert layer.levels[0].occupied_cells == point_count
+    layer_path = output / layer.path
+    assert (layer_path / "lod" / "0" / "index.parquet").is_file()
 
-    parts = sorted((output / "lod" / "0").glob("part-*.parquet"))
+    parts = sorted((layer_path / "lod" / "0").glob("part-*.parquet"))
     assert len(parts) == math.ceil(point_count / 1024)
     assert len(parts) < point_count // 100
 
@@ -43,7 +41,7 @@ def test_extreme_aspect_ratio_uses_sparse_cell_rows(tmp_path):
         pixel_height=1,
         max_points=1,
         max_cells=4,
-    )
+    )["layers"][0]
     assert aggregate["mode"] == "aggregate"
     assert aggregate["cell_count"] <= 4
     assert sum(aggregate["count"]) == point_count
