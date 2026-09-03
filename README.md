@@ -11,8 +11,8 @@ sparse point sets:
 - exact `int64` coordinates stored in partitioned Parquet;
 - bounded-memory Arrow batch ingestion;
 - occupied-cell-only Parquet LOD levels with mergeable reducer state;
-- exact-point responses at high zoom and aggregate square-cell responses at low
-  zoom;
+- adaptive mixed-level frontiers that refine sparse regions all the way to exact
+  points while dense regions remain aggregate cells;
 - mergeable field reductions (`sum`, `mean`, `min`, `max`) compiled from plot
   encodings;
 - a FastAPI viewport service;
@@ -369,29 +369,24 @@ test specifically for this weighted-parent-mean invariant.
 
 `x` and `y` are not reducers. They define the spatial bin itself.
 
-### Exact mode versus aggregate mode
+### Adaptive frontier selection
 
-At sufficiently high zoom, the viewer asks for exact points. In exact mode:
+Viewport rendering no longer switches an entire layer between exact and aggregate
+mode. The sparse factor-two LOD pyramid is treated as an implicit tree. A query
+starts from a budget-fitting coarse level and selectively replaces a visible cell
+with its occupied children whenever that refinement is visually useful and fits
+the primitive budget. Sparse one-child branches can therefore descend much farther
+than dense branches. Level-zero cells refine to exact source points under the same
+rule.
 
-- `x` and `y` identify each original point;
-- categorical marker fields are honored per sample;
-- numeric size fields are honored per sample;
-- numeric color fields are honored per sample;
-- numeric alpha fields are honored per sample;
-- tooltips can expose the exact source style fields.
+The selected frontier is disjoint: every represented region is covered by either
+one aggregate cell or descendants of that cell, never both. A single layer may
+therefore return coarse cells, finer cells, and exact points at the same time.
 
-When the exact point result would exceed the viewport point budget, the server
-selects an aggregate LOD. In aggregate mode:
-
-- the rendered object is the actual square spatial bin;
-- marker and marker-size mappings intentionally disappear;
-- numeric color and alpha use their finalized reducer values;
-- `count()` uses the number of exact points represented by the cell;
-- aggregate tooltips expose the finalized reducer values and cell count.
-
-This distinction is deliberate: the library does not invent an arbitrary
-"representative point" merely to preserve point styling after the points no
-longer exist individually at that LOD.
+`max_primitives` is one GPU-facing budget shared across the visible figure. It
+replaces the old separate exact-point and aggregate-cell budgets.
+`target_cell_pixels` controls the desired maximum projected width of an aggregate
+cell before the selector tries to refine it.
 
 ### Titles, labels, and legends
 
@@ -565,8 +560,8 @@ segmented/BigInt camera state, not merely a different storage type.
   "ymax": 1000000,
   "width": 1200,
   "height": 800,
-  "max_points": 200000,
-  "max_cells": 200000
+  "max_primitives": 200000,
+  "target_cell_pixels": 2.0
 }
 ```
 
