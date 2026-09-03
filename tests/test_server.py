@@ -5,7 +5,7 @@ from massive_scatter import BuildConfig, build_dataset
 from massive_scatter.server import create_app
 
 
-def test_api_serves_layered_manifest_and_view(tmp_path):
+def test_api_serves_adaptive_frontier(tmp_path):
     output = tmp_path / "api.msplot"
     build_dataset(
         output,
@@ -13,9 +13,6 @@ def test_api_serves_layered_manifest_and_view(tmp_path):
         config=BuildConfig(base_cell_size=1, part_rows=4),
     )
 
-    # Exercise the production routing shape where a root StaticFiles mount is
-    # present. Without an explicit GET /api/view route, that catch-all turns the
-    # intended 405 method error into a misleading 404.
     viewer = tmp_path / "viewer"
     viewer.mkdir()
     (viewer / "index.html").write_text("<!doctype html><title>test</title>")
@@ -36,13 +33,15 @@ def test_api_serves_layered_manifest_and_view(tmp_path):
             "ymax": 2,
             "width": 100,
             "height": 100,
+            "max_primitives": 3,
         },
     )
     assert view.status_code == 200
     response = view.json()
     assert response["origin"] == [0, 0]
-    assert response["layers"][0]["mode"] == "exact"
-    assert response["layers"][0]["point_count"] == 3
+    assert response["primitive_count"] == 3
+    assert response["layers"][0]["points"]["point_count"] == 3
+    assert response["layers"][0]["cells"] == []
 
     wrong_method = client.get("/api/view")
     assert wrong_method.status_code == 405
