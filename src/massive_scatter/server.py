@@ -22,8 +22,8 @@ class ViewRequest(BaseModel):
     ymax: float
     width: int = Field(default=1_024, ge=1, le=16_384)
     height: int = Field(default=768, ge=1, le=16_384)
-    max_points: int = Field(default=200_000, ge=1, le=1_000_000)
-    max_cells: int = Field(default=200_000, ge=1, le=1_000_000)
+    max_primitives: int = Field(default=200_000, ge=1, le=1_000_000)
+    target_cell_pixels: float = Field(default=2.0, gt=0.0, le=64.0)
 
 
 def _find_viewer(viewer_dir: str | Path | None) -> Path | None:
@@ -65,17 +65,14 @@ def create_app(
                 max_y=request.ymax,
                 pixel_width=request.width,
                 pixel_height=request.height,
-                max_points=request.max_points,
-                max_cells=request.max_cells,
+                max_primitives=request.max_primitives,
+                target_cell_pixels=request.target_cell_pixels,
             )
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.get("/api/view", include_in_schema=False)
     def view_requires_post() -> None:
-        # A root StaticFiles mount otherwise turns this method mismatch into a
-        # 404 whenever built viewer assets are present. Keep the API contract
-        # independent of whether the frontend happens to be installed.
         raise HTTPException(
             status_code=405,
             detail="Method Not Allowed",
@@ -96,7 +93,9 @@ def create_app(
             <body style="font-family: sans-serif; max-width: 50rem; margin: 4rem auto">
               <h1>Viewer assets have not been built</h1>
               <p>The data API is running. Build the TypeScript viewer with:</p>
-              <pre>cd viewer\nnpm install\nnpm run build</pre>
+              <pre>cd viewer
+npm install
+npm run build</pre>
               <p>Then restart <code>massive-scatter serve</code>.</p>
               <p><a href="/docs">Open the API documentation</a></p>
             </body></html>

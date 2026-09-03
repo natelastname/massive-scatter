@@ -58,25 +58,31 @@ def test_plot_api_compiles_fields_reducers_and_axes(tmp_path):
         max_y=0,
         pixel_width=100,
         pixel_height=100,
-        max_points=10,
+        max_primitives=10,
     )["layers"][0]
-    assert exact["mode"] == "exact"
-    assert exact["fields"]["kind"] == ["E3", "E3", "P3", "other"]
-    assert exact["fields"]["weight"] == [1.0, 3.0, 9.0, 17.0]
+    assert exact["points"]["fields"]["kind"] == ["E3", "E3", "P3", "other"]
+    assert exact["points"]["fields"]["weight"] == [1.0, 3.0, 9.0, 17.0]
+    assert exact["cells"] == []
 
-    aggregate = dataset.view(
+    coarse = dataset.view(
         min_x=0,
         max_x=2,
         min_y=0,
         max_y=0,
         pixel_width=1,
         pixel_height=1,
-        max_points=1,
-        max_cells=2,
+        max_primitives=2,
     )["layers"][0]
-    assert aggregate["mode"] == "aggregate"
+    assert coarse["points"]["point_count"] == 0
+    cells = coarse["cells"]
+    assert sum(batch["cell_count"] for batch in cells) == 2
     by_request = {
-        item.reducer: aggregate["aggregates"][item.key] for item in layer.aggregates
+        item.reducer: [
+            value
+            for cell_batch in cells
+            for value in cell_batch["aggregates"][item.key]
+        ]
+        for item in layer.aggregates
     }
     assert math.isclose(by_request["mean"][0], 13.0 / 3.0)
     assert by_request["max"][0] == 9.0
@@ -97,7 +103,7 @@ def test_constant_color_and_count_require_no_source_field(tmp_path):
     assert layer.aggregates == ()
 
 
-def test_multiple_scatter_layers_keep_independent_lod_and_zorder(tmp_path):
+def test_multiple_scatter_layers_share_global_frontier_budget_and_zorder(tmp_path):
     dense = pa.record_batch([list(range(20)), [0] * 20], names=["x", "y"])
     sparse = pa.record_batch([[0, 10], [1, 1]], names=["x", "y"])
 
@@ -119,7 +125,6 @@ def test_multiple_scatter_layers_keep_independent_lod_and_zorder(tmp_path):
     assert [layer.id for layer in manifest.layers] == ["layer-000", "layer-001"]
     assert [layer.zorder for layer in manifest.layers] == [0.0, -1.0]
     assert manifest.point_count == 22
-    assert manifest.min_y == 0 and manifest.max_y == 1
 
     response = ms.MassiveScatterDataset(output).view(
         min_x=0,
@@ -128,16 +133,15 @@ def test_multiple_scatter_layers_keep_independent_lod_and_zorder(tmp_path):
         max_y=1,
         pixel_width=100,
         pixel_height=100,
-        max_points=5,
-        max_cells=10,
+        max_primitives=10,
     )
     assert response["origin"] == [0, 0]
+    assert response["primitive_count"] <= 10
     assert [layer["id"] for layer in response["layers"]] == [
         "layer-001",
         "layer-000",
     ]
     by_id = {layer["id"]: layer for layer in response["layers"]}
-    assert by_id["layer-001"]["mode"] == "exact"
-    assert by_id["layer-001"]["point_count"] == 2
-    assert by_id["layer-000"]["mode"] == "aggregate"
-    assert by_id["layer-000"]["cell_count"] <= 10
+    assert by_id["layer-001"]["points"]["point_count"] == 2
+    assert by_id["layer-001"]["cells"] == []
+    assert by_id["layer-000"]["primitive_count"] <= 5

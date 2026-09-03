@@ -11,13 +11,13 @@ sparse point sets:
 - exact `int64` coordinates stored in partitioned Parquet;
 - bounded-memory Arrow batch ingestion;
 - occupied-cell-only Parquet LOD levels with mergeable reducer state;
-- exact-point responses at high zoom and aggregate square-cell responses at low
-  zoom;
+- adaptive mixed-level frontiers that refine sparse regions all the way to exact
+  points while dense regions remain aggregate cells;
 - mergeable field reductions (`sum`, `mean`, `min`, `max`) compiled from plot
   encodings;
 - a FastAPI viewport service;
-- a deck.gl orthographic viewer with pan/zoom, axes, hover values, per-point
-  styling, and generated legends.
+- a deck.gl orthographic viewer with pan/zoom, axes, hover values, generated
+  legends, and typed/binary GPU attributes rather than object-per-primitive input.
 
 ## Why this does not allocate the rectangular figure
 
@@ -46,8 +46,9 @@ and sparse LOD pyramid are independent of every other layer; only the figure
 bounds, axes, camera, and legend are shared.
 
 The finest numerical LOD begins at `base_cell_size` units per cell (64 by
-default). Below that scale the viewer asks for exact points. Aggregate cells are
-rendered as the square spatial bins they represent.
+default). It is the last aggregate level of the same implicit tree: selected
+level-zero cells can refine further to their exact source-point leaves. Aggregate
+cells are rendered as the square spatial bins they represent.
 
 Only occupied cells are stored. Empty cells in the logical rectangle consume no
 LOD rows, files, or chunks. During construction a temporary on-disk SQLite
@@ -206,9 +207,9 @@ The iterable form lets generated or streamed data remain bounded-memory instead
 of first materializing the full dataset in Python.
 
 Repeated `scatter()` calls create independent layers on the same axes. Each layer
-keeps its own exact-point store, sparse LOD pyramid, reducers, styling, and exact-vs-
-aggregate decision while sharing the figure camera, axes, and legend. Call order is
-the default z-order; pass `zorder=` to override it.
+keeps its own exact-point store, sparse LOD pyramid, reducers, styling, and adaptive
+frontier while sharing the figure camera, axes, and legend. Call order is the
+default z-order; pass `zorder=` to override it.
 
 `c=` and `color=` are mutually exclusive. `c=` means a data mapping; `color=`
 means a constant CSS color.
@@ -369,29 +370,31 @@ test specifically for this weighted-parent-mean invariant.
 
 `x` and `y` are not reducers. They define the spatial bin itself.
 
-### Exact mode versus aggregate mode
+### Adaptive frontier selection
 
-At sufficiently high zoom, the viewer asks for exact points. In exact mode:
+Viewport rendering no longer switches an entire layer between exact and aggregate
+mode. The sparse factor-two LOD pyramid is treated as an implicit tree. A query
+starts from a budget-fitting coarse level and selectively replaces a visible cell
+with its occupied children whenever that refinement is visually useful and fits
+the primitive budget. Sparse one-child branches can therefore descend much farther
+than dense branches. Level-zero cells refine to exact source points under the same
+rule.
 
-- `x` and `y` identify each original point;
-- categorical marker fields are honored per sample;
-- numeric size fields are honored per sample;
-- numeric color fields are honored per sample;
-- numeric alpha fields are honored per sample;
-- tooltips can expose the exact source style fields.
+The selected frontier is disjoint: every represented region is covered by either
+one aggregate cell or descendants of that cell, never both. A single layer may
+therefore return coarse cells, finer cells, and exact points at the same time.
 
-When the exact point result would exceed the viewport point budget, the server
-selects an aggregate LOD. In aggregate mode:
+`max_primitives` is one GPU-facing budget shared across the visible figure. It
+replaces the old separate exact-point and aggregate-cell budgets.
+`target_cell_pixels` controls the desired maximum projected width of an aggregate
+cell before the selector tries to refine it.
 
-- the rendered object is the actual square spatial bin;
-- marker and marker-size mappings intentionally disappear;
-- numeric color and alpha use their finalized reducer values;
-- `count()` uses the number of exact points represented by the cell;
-- aggregate tooltips expose the finalized reducer values and cell count.
-
-This distinction is deliberate: the library does not invent an arbitrary
-"representative point" merely to preserve point styling after the points no
-longer exist individually at that LOD.
+The GPU is only the terminal rasterizer. After the frontier is selected, the viewer
+packs positions, colors, and sizes into typed deck.gl binary attributes and avoids
+creating one JavaScript object per visible primitive. Picking uses compact response
+arrays as sidecars indexed by deck.gl's picking index. The HTTP response is still
+JSON today, so JSON parsing and the subsequent typed-array packing remain a future
+transport optimization target (for example Arrow IPC).
 
 ### Titles, labels, and legends
 
@@ -565,16 +568,17 @@ segmented/BigInt camera state, not merely a different storage type.
   "ymax": 1000000,
   "width": 1200,
   "height": 800,
-  "max_points": 200000,
-  "max_cells": 200000
+  "max_primitives": 200000,
+  "target_cell_pixels": 2.0
 }
 ```
 
 The response has one shared viewport-local origin plus a `layers` array. Each
-layer independently returns either exact points or sparse aggregate cells, so a
-sparse layer can remain exact while a denser layer in the same viewport moves to
-a coarser LOD. All layer coordinates are rebased into the shared response origin
-before transfer. No raster image tiles are generated or transferred.
+layer returns an adaptive frontier containing an exact-point batch plus zero or more
+aggregate-cell batches at potentially different LOD levels. Sparse branches can
+therefore reach exact leaves while dense branches in the same layer remain coarse.
+All coordinates are rebased into the shared response origin before transfer. No
+raster image tiles are generated or transferred.
 
 ## Development
 
