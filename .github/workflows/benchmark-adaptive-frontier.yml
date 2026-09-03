@@ -1,0 +1,103 @@
+name: Benchmark adaptive frontier
+
+on:
+  push:
+    branches:
+      - feature/adaptive-frontier-rendering-20260902
+
+jobs:
+  benchmark:
+    if: github.event.head_commit.message == 'Benchmark adaptive frontier'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+      - name: Install
+        run: uv sync --locked --all-groups
+      - name: Build mixed-density dataset and benchmark queries
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          from time import perf_counter
+          import tempfile
+
+          import numpy as np
+          import pyarrow as pa
+
+          from massive_scatter import BuildConfig, MassiveScatterDataset, build_dataset
+
+          dense_n = 180_000
+          sparse_n = 20_000
+          dense_i = np.arange(dense_n, dtype=np.int64)
+          dense_x = dense_i % 1000
+          dense_y = (dense_i * 37) % 1000
+
+          sparse_i = np.arange(sparse_n, dtype=np.int64)
+          sparse_x = 2_000 + (sparse_i % 125) * 64
+          sparse_y = 2_000 + (sparse_i // 125) * 64
+
+          x = np.concatenate([dense_x, sparse_x])
+          y = np.concatenate([dense_y, sparse_y])
+          batch = pa.record_batch([x, y], names=['x', 'y'])
+
+          with tempfile.TemporaryDirectory() as tmp:
+              output = Path(tmp) / 'mixed.msplot'
+              started = perf_counter()
+              build_dataset(
+                  output,
+                  [batch],
+                  config=BuildConfig(
+                      base_cell_size=64,
+                      part_rows=50_000,
+                      batch_size=32_768,
+                  ),
+              )
+              print(f'build_ms={(perf_counter() - started) * 1000:.1f}')
+              dataset = MassiveScatterDataset(output)
+
+              queries = [
+                  ('full-25k', dict(
+                      min_x=0, max_x=int(x.max()), min_y=0, max_y=int(y.max()),
+                      pixel_width=1200, pixel_height=800,
+                      max_primitives=25_000, target_cell_pixels=2.0,
+                  )),
+                  ('full-50k', dict(
+                      min_x=0, max_x=int(x.max()), min_y=0, max_y=int(y.max()),
+                      pixel_width=1200, pixel_height=800,
+                      max_primitives=50_000, target_cell_pixels=2.0,
+                  )),
+                  ('dense-5k', dict(
+                      min_x=0, max_x=1000, min_y=0, max_y=1000,
+                      pixel_width=1200, pixel_height=800,
+                      max_primitives=5_000, target_cell_pixels=2.0,
+                  )),
+                  ('sparse-25k', dict(
+                      min_x=1900, max_x=int(sparse_x.max()) + 64,
+                      min_y=1900, max_y=int(sparse_y.max()) + 64,
+                      pixel_width=1200, pixel_height=800,
+                      max_primitives=25_000, target_cell_pixels=2.0,
+                  )),
+              ]
+
+              for name, kwargs in queries:
+                  times = []
+                  response = None
+                  for iteration in range(6):
+                      started = perf_counter()
+                      response = dataset.view(**kwargs)
+                      elapsed = (perf_counter() - started) * 1000
+                      if iteration:
+                          times.append(elapsed)
+                  assert response is not None
+                  layer = response['layers'][0]
+                  levels = [(batch['level'], batch['cell_count']) for batch in layer['cells']]
+                  print(
+                      f'{name}: warm_ms_min={min(times):.2f} '
+                      f'warm_ms_mean={sum(times)/len(times):.2f} '
+                      f'primitives={response["primitive_count"]} '
+                      f'exact={layer["points"]["point_count"]} levels={levels}'
+                  )
+          PY
