@@ -51,7 +51,7 @@ def _index_row(value: dict[str, object]) -> _IndexRow:
 
 
 class SparseLodReader:
-    """Read occupied-cell Parquet LOD levels with coarse part pruning."""
+    """Read occupied-cell Parquet levels as an implicit refinement tree."""
 
     def __init__(self, path: Path, manifest: LayerManifest) -> None:
         self.path = path
@@ -66,6 +66,13 @@ class SparseLodReader:
         rows = [_index_row(row) for row in pq.read_table(path).to_pylist()]
         self._indexes[level] = rows
         return rows
+
+    def _empty_level_table(self, level: int) -> pa.Table:
+        parts = self._index(level)
+        if not parts:
+            raise RuntimeError(f"LOD {level} has no indexed parts.")
+        schema = pq.read_schema(self.path / parts[0]["path"])
+        return pa.Table.from_batches([], schema=schema)
 
     def _candidate_parts(
         self,
@@ -105,7 +112,33 @@ class SparseLodReader:
         y1 = min(level.height, math.floor(max_y / level.cell_size) + 1)
         return x0, x1, y0, y1
 
-    def choose_level(
+    def _read_bounds(
+        self,
+        level: int,
+        *,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> pa.Table:
+        if x0 >= x1 or y0 >= y1:
+            return self._empty_level_table(level)
+        paths, _ = self._candidate_parts(level, x0=x0, x1=x1, y0=y0, y1=y1)
+        if not paths:
+            return self._empty_level_table(level)
+        dataset = pads.dataset([str(path) for path in paths], format="parquet")
+        predicate = (
+            (pads.field("cell_x") >= x0)
+            & (pads.field("cell_x") < x1)
+            & (pads.field("cell_y") >= y0)
+            & (pads.field("cell_y") < y1)
+        )
+        return dataset.to_table(
+            columns=list(sparse_level_columns(self.manifest.aggregates)),
+            filter=predicate,
+        )
+
+    def choose_seed_level(
         self,
         *,
         min_x: float,
@@ -114,12 +147,14 @@ class SparseLodReader:
         max_y: float,
         pixel_width: int,
         pixel_height: int,
-        max_cells: int,
+        max_primitives: int,
     ) -> LevelManifest:
+        """Choose the finest uniform starting level whose coarse index fits budget."""
+
         units_per_pixel = max(
             (max_x - min_x) / max(1, pixel_width),
             (max_y - min_y) / max(1, pixel_height),
-            1.0,
+            1e-12,
         )
         level = self.manifest.levels[-1]
         for candidate in self.manifest.levels:
@@ -136,11 +171,80 @@ class SparseLodReader:
                 max_y=max_y,
             )
             _, upper_bound = self._candidate_parts(
-                level.level, x0=x0, x1=x1, y0=y0, y1=y1
+                level.level,
+                x0=x0,
+                x1=x1,
+                y0=y0,
+                y1=y1,
             )
-            if upper_bound <= max_cells or level.level >= self.manifest.max_level:
+            if upper_bound <= max_primitives or level.level >= self.manifest.max_level:
                 return level
             level = self.manifest.levels[level.level + 1]
+
+    def view_table(
+        self,
+        level: LevelManifest,
+        *,
+        min_x: float,
+        max_x: float,
+        min_y: float,
+        max_y: float,
+    ) -> pa.Table:
+        x0, x1, y0, y1 = self._cell_bounds(
+            level,
+            min_x=min_x,
+            max_x=max_x,
+            min_y=min_y,
+            max_y=max_y,
+        )
+        return self._read_bounds(level.level, x0=x0, x1=x1, y0=y0, y1=y1)
+
+    def children(
+        self,
+        parent_level: int,
+        parents: set[tuple[int, int]],
+        *,
+        min_x: float,
+        max_x: float,
+        min_y: float,
+        max_y: float,
+    ) -> pa.Table:
+        """Return visible occupied children of the selected parent cells."""
+
+        if parent_level <= 0:
+            raise ValueError("Level zero cells have exact points, not LOD children.")
+        child = self.manifest.levels[parent_level - 1]
+        if not parents:
+            return self._empty_level_table(child.level)
+
+        vx0, vx1, vy0, vy1 = self._cell_bounds(
+            child,
+            min_x=min_x,
+            max_x=max_x,
+            min_y=min_y,
+            max_y=max_y,
+        )
+        px = [coord[0] for coord in parents]
+        py = [coord[1] for coord in parents]
+        x0 = max(vx0, min(px) * 2)
+        x1 = min(vx1, (max(px) + 1) * 2)
+        y0 = max(vy0, min(py) * 2)
+        y1 = min(vy1, (max(py) + 1) * 2)
+        table = self._read_bounds(child.level, x0=x0, x1=x1, y0=y0, y1=y1)
+        if table.num_rows == 0:
+            return table
+
+        cell_x = np.asarray(table["cell_x"].combine_chunks(), dtype=np.int64)
+        cell_y = np.asarray(table["cell_y"].combine_chunks(), dtype=np.int64)
+        keep = np.fromiter(
+            (
+                (int(x) // 2, int(y) // 2) in parents
+                for x, y in zip(cell_x, cell_y, strict=True)
+            ),
+            dtype=np.bool_,
+            count=table.num_rows,
+        )
+        return table.filter(pa.array(keep))
 
     @staticmethod
     def _finalized_aggregate(request: AggregateRequest, table: pa.Table) -> list[float]:
@@ -155,43 +259,22 @@ class SparseLodReader:
             values = np.asarray(table[state[0]].combine_chunks(), dtype=np.float64)
         return [float(value) for value in values]
 
-    def aggregate_view(
+    def response_batch(
         self,
+        level: int,
+        table: pa.Table,
         *,
-        min_x: float,
-        max_x: float,
-        min_y: float,
-        max_y: float,
-        pixel_width: int,
-        pixel_height: int,
-        max_cells: int,
+        origin_x: int,
+        origin_y: int,
     ) -> dict[str, Any]:
-        level = self.choose_level(
-            min_x=min_x,
-            max_x=max_x,
-            min_y=min_y,
-            max_y=max_y,
-            pixel_width=pixel_width,
-            pixel_height=pixel_height,
-            max_cells=max_cells,
-        )
-        x0, x1, y0, y1 = self._cell_bounds(
-            level,
-            min_x=min_x,
-            max_x=max_x,
-            min_y=min_y,
-            max_y=max_y,
-        )
-        cell_size = level.cell_size
-        origin_x = x0 * cell_size
-        origin_y = y0 * cell_size
+        """Finalize one selected frontier level for transport to the viewer."""
 
-        def empty() -> dict[str, Any]:
+        level_manifest = self.manifest.levels[level]
+        cell_size = level_manifest.cell_size
+        if table.num_rows == 0:
             return {
-                "mode": "aggregate",
-                "level": level.level,
+                "level": level,
                 "cell_size": cell_size,
-                "origin": [origin_x, origin_y],
                 "x": [],
                 "y": [],
                 "count": [],
@@ -200,45 +283,18 @@ class SparseLodReader:
                 "cell_count": 0,
             }
 
-        if x0 >= x1 or y0 >= y1:
-            return empty()
-        paths, _ = self._candidate_parts(level.level, x0=x0, x1=x1, y0=y0, y1=y1)
-        if not paths:
-            return empty()
-
-        dataset = pads.dataset([str(path) for path in paths], format="parquet")
-        predicate = (
-            (pads.field("cell_x") >= x0)
-            & (pads.field("cell_x") < x1)
-            & (pads.field("cell_y") >= y0)
-            & (pads.field("cell_y") < y1)
-        )
-        table = dataset.to_table(
-            columns=list(sparse_level_columns(self.manifest.aggregates)),
-            filter=predicate,
-        )
-        if table.num_rows == 0:
-            return empty()
-        if table.num_rows > max_cells:
-            # The part index is deliberately an upper bound, so reaching this
-            # branch should only be possible at the final one-cell level.
-            raise RuntimeError(
-                f"Sparse LOD query returned {table.num_rows:,} cells, exceeding "
-                f"the {max_cells:,} cell budget."
-            )
-
         cell_x = np.asarray(table["cell_x"].combine_chunks(), dtype=np.int64)
         cell_y = np.asarray(table["cell_y"].combine_chunks(), dtype=np.int64)
         counts = np.asarray(table["count"].combine_chunks(), dtype=np.uint64)
         half = cell_size / 2
-        x_values = ((cell_x - x0).astype(np.float64) * cell_size + half).tolist()
-        y_values = ((cell_y - y0).astype(np.float64) * cell_size + half).tolist()
+        x_values = (cell_x.astype(np.float64) * cell_size + half - origin_x).tolist()
+        y_values = (cell_y.astype(np.float64) * cell_size + half - origin_y).tolist()
         aggregate_values = {
             request.key: self._finalized_aggregate(request, table)
             for request in self.manifest.aggregates
         }
 
-        legacy_color: list[float] | None = None
+        direct_color: list[float] | None = None
         if self.manifest.color_field:
             request = next(
                 (
@@ -249,17 +305,15 @@ class SparseLodReader:
                 None,
             )
             if request is not None:
-                legacy_color = aggregate_values[request.key]
+                direct_color = aggregate_values[request.key]
 
         return {
-            "mode": "aggregate",
-            "level": level.level,
+            "level": level,
             "cell_size": cell_size,
-            "origin": [origin_x, origin_y],
             "x": x_values,
             "y": y_values,
             "count": [int(value) for value in counts],
-            "color": legacy_color,
+            "color": direct_color,
             "aggregates": aggregate_values,
             "cell_count": table.num_rows,
         }
