@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.event.head_commit.message == 'Add temporary adaptive frontier workflow'
+    if: github.event.head_commit.message == 'Run adaptive frontier validation'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +25,9 @@ jobs:
           cache-dependency-path: viewer/package-lock.json
 
       - name: Apply adaptive frontier implementation
-        run: python .github/adaptive_frontier_patch.py
+        run: |
+          python .github/adaptive_frontier_patch.py
+          python .github/adaptive_frontier_fix.py
 
       - name: Validate Python
         run: |
