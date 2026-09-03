@@ -19,17 +19,18 @@ def test_parent_levels_preserve_counts_and_max_color(tmp_path):
     assert len(manifest.layers[0].levels) >= 2
     dataset = MassiveScatterDataset(output)
     assert dataset.check() == []
-    response = dataset.view(
+    layer = dataset.view(
         min_x=0,
         max_x=13,
         min_y=0,
         max_y=13,
         pixel_width=1,
         pixel_height=1,
-        max_points=1,
-        max_cells=1,
-    )
-    layer = response["layers"][0]
-    assert layer["mode"] == "aggregate"
-    assert sum(layer["count"]) == len(x)
-    assert max(layer["color"]) == 9.0
+        max_primitives=1,
+    )["layers"][0]
+
+    assert layer["points"]["point_count"] == 0
+    assert layer["primitive_count"] == 1
+    assert sum(sum(batch["count"]) for batch in layer["cells"]) == len(x)
+    colors = [value for batch in layer["cells"] for value in (batch["color"] or [])]
+    assert max(colors) == 9.0
