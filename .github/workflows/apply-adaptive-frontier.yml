@@ -1,0 +1,113 @@
+name: Apply adaptive frontier
+
+on:
+  push:
+    branches:
+      - feature/adaptive-frontier-rendering-20260902
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Add temporary adaptive frontier workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
+
+      - name: Apply adaptive frontier implementation
+        run: python .github/adaptive_frontier_patch.py
+
+      - name: Validate Python
+        run: |
+          uv sync --locked --all-groups
+          uv run black src tests
+          uv run ruff check --fix src tests
+          uv run black --check src tests
+          uv run ruff check src tests
+          uv run basedpyright
+          uv run pytest
+
+      - name: Validate viewer
+        working-directory: viewer
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Publish validated production files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          repo = os.environ['REPO']
+          branch = os.environ['BRANCH']
+          headers = {
+              'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+
+          def request(method, url, payload=None):
+              req = Request(
+                  url,
+                  data=None if payload is None else json.dumps(payload).encode(),
+                  headers=headers,
+                  method=method,
+              )
+              with urlopen(req) as response:
+                  return json.load(response)
+
+          def put(path):
+              url = f'https://api.github.com/repos/{repo}/contents/{quote(path)}'
+              sha = None
+              try:
+                  sha = request('GET', f'{url}?ref={quote(branch)}')['sha']
+              except HTTPError as error:
+                  if error.code != 404:
+                      raise
+              payload = {
+                  'message': f'Implement adaptive frontier: {path}',
+                  'content': base64.b64encode(Path(path).read_bytes()).decode(),
+                  'branch': branch,
+              }
+              if sha is not None:
+                  payload['sha'] = sha
+              request('PUT', url, payload)
+
+          for path in [
+              'README.md',
+              'src/massive_scatter/dataset.py',
+              'src/massive_scatter/server.py',
+              'src/massive_scatter/sparse_dataset.py',
+              'tests/test_adaptive_frontier.py',
+              'tests/test_build_query.py',
+              'tests/test_lod.py',
+              'tests/test_plot_api.py',
+              'tests/test_server.py',
+              'tests/test_sparse_lod.py',
+              'viewer/index.html',
+              'viewer/src/main.ts',
+          ]:
+              put(path)
+          PY
