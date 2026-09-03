@@ -11,7 +11,15 @@ def make_batch(origin: int, size: int = 1024) -> pa.RecordBatch:
     return pa.record_batch([x, y, color], names=["x", "y", "weight"])
 
 
-def test_build_exact_and_aggregate_views(tmp_path):
+def _represented_points(layer: dict[str, object]) -> int:
+    points = layer["points"]
+    assert isinstance(points, dict)
+    cells = layer["cells"]
+    assert isinstance(cells, list)
+    return int(points["point_count"]) + sum(sum(batch["count"]) for batch in cells)
+
+
+def test_build_adaptive_frontier_views(tmp_path):
     origin = 9_100_000_000_000_000
     output = tmp_path / "example.msplot"
     manifest = build_dataset(
@@ -35,28 +43,26 @@ def test_build_exact_and_aggregate_views(tmp_path):
         max_y=1023,
         pixel_width=1000,
         pixel_height=1000,
-        max_points=100,
+        max_primitives=100,
     )
     assert exact["origin"] == [100, 0]
     layer = exact["layers"][0]
-    assert layer["mode"] == "exact"
-    assert layer["x"] == list(range(11))
-    assert all(isinstance(value, int) for value in layer["x"])
+    assert layer["points"]["x"] == list(range(11))
+    assert all(isinstance(value, int) for value in layer["points"]["x"])
+    assert layer["primitive_count"] <= 100
 
-    aggregate = dataset.view(
+    coarse = dataset.view(
         min_x=0,
         max_x=1023,
         min_y=0,
         max_y=1023,
         pixel_width=8,
         pixel_height=8,
-        max_points=10,
-        max_cells=64,
+        max_primitives=64,
     )
-    layer = aggregate["layers"][0]
-    assert layer["mode"] == "aggregate"
-    assert sum(layer["count"]) == 1024
-    assert layer["cell_count"] <= 64
+    layer = coarse["layers"][0]
+    assert layer["primitive_count"] <= 64
+    assert _represented_points(layer) == 1024
 
 
 def test_unit_separation_survives_shared_origin_rebasing(tmp_path):
@@ -82,10 +88,10 @@ def test_unit_separation_survives_shared_origin_rebasing(tmp_path):
         max_y=1,
         pixel_width=100,
         pixel_height=100,
-        max_points=10,
+        max_primitives=10,
     )
     assert response["origin"] == [0, 0]
     layer = response["layers"][0]
-    assert layer["mode"] == "exact"
-    assert layer["x"] == [0, 1]
-    assert layer["y"] == [0, 1]
+    assert layer["points"]["x"] == [0, 1]
+    assert layer["points"]["y"] == [0, 1]
+    assert layer["cells"] == []
