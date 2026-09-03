@@ -21,9 +21,9 @@ def test_extreme_aspect_ratio_uses_sparse_cell_rows(tmp_path):
 
     assert manifest.schema_version == 4
     assert manifest.lod_storage == "layered_sparse_parquet"
-    layer = manifest.layers[0]
-    assert layer.levels[0].occupied_cells == point_count
-    layer_path = output / layer.path
+    layer_manifest = manifest.layers[0]
+    assert layer_manifest.levels[0].occupied_cells == point_count
+    layer_path = output / layer_manifest.path
     assert (layer_path / "lod" / "0" / "index.parquet").is_file()
 
     parts = sorted((layer_path / "lod" / "0").glob("part-*.parquet"))
@@ -32,16 +32,15 @@ def test_extreme_aspect_ratio_uses_sparse_cell_rows(tmp_path):
 
     dataset = MassiveScatterDataset(output)
     assert dataset.check() == []
-    aggregate = dataset.view(
+    layer = dataset.view(
         min_x=0,
         max_x=point_count - 1,
         min_y=0,
         max_y=(point_count - 1) * 100_000,
         pixel_width=1,
         pixel_height=1,
-        max_points=1,
-        max_cells=4,
+        max_primitives=4,
     )["layers"][0]
-    assert aggregate["mode"] == "aggregate"
-    assert aggregate["cell_count"] <= 4
-    assert sum(aggregate["count"]) == point_count
+    assert layer["primitive_count"] <= 4
+    assert layer["points"]["point_count"] == 0
+    assert sum(sum(batch["count"]) for batch in layer["cells"]) == point_count
