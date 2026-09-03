@@ -1,6 +1,7 @@
 import {
   COORDINATE_SYSTEM,
   Deck,
+  type Layer,
   type PickingInfo,
   type ViewStateChangeParameters,
 } from '@deck.gl/core';
@@ -91,29 +92,47 @@ interface Manifest {
   layers: LayerManifest[];
 }
 
-interface LayerViewResponse {
-  id: string;
-  zorder: number;
-  mode: 'exact' | 'aggregate';
+interface PrimitiveViewResponse {
   x: number[];
   y: number[];
   color: number[] | null;
   fields?: Record<string, Scalar[]>;
   aggregates?: Record<string, number[]>;
   count?: number[];
-  point_count?: number;
-  cell_count?: number;
-  cell_size?: number;
-  level?: number;
+}
+
+interface PointViewResponse extends PrimitiveViewResponse {
+  point_count: number;
+}
+
+interface CellViewResponse extends PrimitiveViewResponse {
+  level: number;
+  cell_size: number;
+  count: number[];
+  aggregates: Record<string, number[]>;
+  cell_count: number;
+}
+
+interface LayerViewResponse {
+  id: string;
+  zorder: number;
+  points: PointViewResponse;
+  cells: CellViewResponse[];
+  primitive_count: number;
+  budget: number;
 }
 
 interface ViewResponse {
   origin: [number, number];
   layers: LayerViewResponse[];
+  primitive_count: number;
 }
 
 interface PlotDatum {
   layerId: string;
+  kind: 'point' | 'cell';
+  level?: number;
+  cellSize?: number;
   position: [number, number];
   legacyValue: number;
   count: number;
@@ -133,7 +152,7 @@ const summary = requiredElement<HTMLElement>('dataset-summary');
 const figureTitle = requiredElement<HTMLElement>('figure-title');
 const legend = requiredElement<HTMLElement>('legend');
 const homeButton = requiredElement<HTMLButtonElement>('home');
-const maxPointsInput = requiredElement<HTMLInputElement>('max-points');
+const maxPrimitivesInput = requiredElement<HTMLInputElement>('max-primitives');
 
 let manifest: Manifest;
 let worldViewState: OrthographicState = {target: [0, 0, 0], zoom: 0};
@@ -216,8 +235,7 @@ function requestView() {
     ymax: bounds.maxY,
     width: plot.clientWidth,
     height: plot.clientHeight,
-    max_points: Math.max(1, Number(maxPointsInput.value) || 200_000),
-    max_cells: 200_000,
+    max_primitives: Math.max(1, Number(maxPrimitivesInput.value) || 200_000),
   };
   status.textContent = 'loading viewport…';
 
@@ -241,7 +259,13 @@ function requestView() {
   );
 }
 
-function responseData(response: LayerViewResponse): PlotDatum[] {
+function responseData(
+  layerId: string,
+  response: PrimitiveViewResponse,
+  kind: 'point' | 'cell',
+  level?: number,
+  cellSize?: number,
+): PlotDatum[] {
   const counts = response.count;
   const legacyValues = response.color ?? counts ?? new Array(response.x.length).fill(1);
   const fieldArrays = response.fields ?? {};
@@ -256,7 +280,10 @@ function responseData(response: LayerViewResponse): PlotDatum[] {
       aggregateValues[name] = values[index] ?? 0;
     }
     return {
-      layerId: response.id,
+      layerId,
+      kind,
+      level,
+      cellSize,
       position: [x, response.y[index] ?? 0],
       legacyValue: legacyValues[index] ?? 0,
       count: counts?.[index] ?? 1,
@@ -302,6 +329,48 @@ function encodingRange(
     },
     sourceRange ?? [0, 1],
   );
+}
+
+function mergeNumericRange(
+  left: NumericRange | null,
+  right: NumericRange,
+): NumericRange {
+  return left
+    ? [Math.min(left[0], right[0]), Math.max(left[1], right[1])]
+    : right;
+}
+
+interface RangeBatch {
+  data: PlotDatum[];
+  aggregate: boolean;
+}
+
+function combinedLegacyRange(batches: RangeBatch[]): NumericRange {
+  let result: NumericRange | null = null;
+  for (const batch of batches) {
+    if (batch.data.length === 0) continue;
+    result = mergeNumericRange(
+      result,
+      finiteRangeBy(batch.data, datum => datum.legacyValue),
+    );
+  }
+  return result ?? [0, 1];
+}
+
+function combinedEncodingRange(
+  layer: LayerManifest,
+  encoding: EncodingManifest,
+  batches: RangeBatch[],
+): NumericRange {
+  let result: NumericRange | null = null;
+  for (const batch of batches) {
+    if (batch.data.length === 0) continue;
+    result = mergeNumericRange(
+      result,
+      encodingRange(layer, encoding, batch.data, batch.aggregate),
+    );
+  }
+  return result ?? [0, 1];
 }
 
 function normalized(value: number, range: NumericRange, low = 0, high = 1): number {
@@ -367,85 +436,115 @@ function datumSize(layer: LayerManifest, datum: PlotDatum): number {
   return normalized(raw, range, 3, 14);
 }
 
-function makeDeckLayer(response: LayerViewResponse) {
+function makeDeckLayers(response: LayerViewResponse): Layer[] {
   const layer = layerManifest(response.id);
-  const data = responseData(response);
-  const aggregate = response.mode === 'aggregate';
+  const pointData = responseData(layer.id, response.points, 'point');
+  const cellGroups = response.cells.map(batch => ({
+    batch,
+    data: responseData(layer.id, batch, 'cell', batch.level, batch.cell_size),
+  }));
+  const rangeBatches: RangeBatch[] = [
+    {data: pointData, aggregate: false},
+    ...cellGroups.map(group => ({data: group.data, aggregate: true})),
+  ];
+
   let colorRange: NumericRange | null;
   let alphaRange: NumericRange | null = null;
   if (!layer.plot) {
-    colorRange = finiteRangeBy(data, datum => datum.legacyValue);
+    colorRange = combinedLegacyRange(rangeBatches);
   } else {
     const scatter = layer.plot.scatter;
-    colorRange = scatter.color.kind === 'constant' ? null : encodingRange(layer, scatter.color, data, aggregate);
+    colorRange =
+      scatter.color.kind === 'constant'
+        ? null
+        : combinedEncodingRange(layer, scatter.color, rangeBatches);
     if (scatter.alpha.kind !== 'constant') {
-      alphaRange = encodingRange(layer, scatter.alpha, data, aggregate);
+      alphaRange = combinedEncodingRange(layer, scatter.alpha, rangeBatches);
     }
   }
   currentColorRanges.set(layer.id, colorRange);
 
-  if (aggregate) {
-    return new GridCellLayer<PlotDatum>({
-      id: `cells-${layer.id}-${response.level ?? 'aggregate'}`,
-      data,
-      coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-      cellSize: response.cell_size ?? 1,
-      coverage: 1,
-      extruded: false,
-      getPosition: datum => aggregateCellCorner(datum.position, response.cell_size ?? 1),
-      getFillColor: datum => datumColor(layer, datum, true, colorRange, alphaRange),
-      opacity: 1,
-      pickable: true,
-    });
+  const result: Layer[] = [];
+  for (const {batch, data} of cellGroups) {
+    if (data.length === 0) continue;
+    result.push(
+      new GridCellLayer<PlotDatum>({
+        id: `cells-${layer.id}-lod-${batch.level}`,
+        data,
+        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+        cellSize: batch.cell_size,
+        coverage: 1,
+        extruded: false,
+        getPosition: datum => aggregateCellCorner(datum.position, batch.cell_size),
+        getFillColor: datum =>
+          datumColor(layer, datum, true, colorRange, alphaRange),
+        opacity: 1,
+        pickable: true,
+      }),
+    );
   }
+
+  if (pointData.length === 0) return result;
   if (layer.plot) {
-    return new IconLayer<PlotDatum>({
-      id: `points-styled-${layer.id}`,
-      data,
-      coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-      getPosition: datum => datum.position,
-      getIcon: datum => markerIcon(datumMarker(layer, datum)),
-      getSize: datum => datumSize(layer, datum),
-      sizeUnits: 'pixels',
-      sizeMinPixels: 2,
-      sizeMaxPixels: 24,
-      getColor: datum => datumColor(layer, datum, false, colorRange, alphaRange),
-      pickable: true,
-    });
+    result.push(
+      new IconLayer<PlotDatum>({
+        id: `points-styled-${layer.id}`,
+        data: pointData,
+        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+        getPosition: datum => datum.position,
+        getIcon: datum => markerIcon(datumMarker(layer, datum)),
+        getSize: datum => datumSize(layer, datum),
+        sizeUnits: 'pixels',
+        sizeMinPixels: 2,
+        sizeMaxPixels: 24,
+        getColor: datum =>
+          datumColor(layer, datum, false, colorRange, alphaRange),
+        pickable: true,
+      }),
+    );
+  } else {
+    result.push(
+      new ScatterplotLayer<PlotDatum>({
+        id: `points-native-${layer.id}`,
+        data: pointData,
+        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+        getPosition: datum => datum.position,
+        getRadius: 0.42,
+        radiusUnits: 'common',
+        radiusMinPixels: 1.35,
+        radiusMaxPixels: 5,
+        getFillColor: datum =>
+          datumColor(layer, datum, false, colorRange, alphaRange),
+        opacity: 0.92,
+        stroked: false,
+        pickable: true,
+      }),
+    );
   }
-  return new ScatterplotLayer<PlotDatum>({
-    id: `points-native-${layer.id}`,
-    data,
-    coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-    getPosition: datum => datum.position,
-    getRadius: 0.42,
-    radiusUnits: 'common',
-    radiusMinPixels: 1.35,
-    radiusMaxPixels: 5,
-    getFillColor: datum => datumColor(layer, datum, false, colorRange, alphaRange),
-    opacity: 0.92,
-    stroked: false,
-    pickable: true,
-  });
+  return result;
 }
 
 function renderLayers(response: ViewResponse) {
   currentColorRanges.clear();
   renderOrigin = response.origin;
   const renderViewState = toRenderViewState(worldViewState, renderOrigin);
-  const deckLayers = response.layers.map(makeDeckLayer);
+  const deckLayers = response.layers.flatMap(makeDeckLayers);
   deck.setProps({viewState: renderViewState, layers: deckLayers});
   renderLegend();
 
-  let rendered = 0;
-  let exactLayers = 0;
-  let aggregateLayers = 0;
-  for (const layer of response.layers) {
-    rendered += layer.mode === 'exact' ? layer.point_count ?? layer.x.length : layer.cell_count ?? layer.x.length;
-    if (layer.mode === 'exact') exactLayers += 1;
-    else aggregateLayers += 1;
-  }
-  status.textContent = `${integerFormat(response.layers.length)} layers · ${integerFormat(rendered)} rendered objects · ${exactLayers} exact / ${aggregateLayers} aggregate`;
+  const exactPoints = response.layers.reduce(
+    (total, layer) => total + layer.points.point_count,
+    0,
+  );
+  const aggregateCells = response.layers.reduce(
+    (total, layer) =>
+      total + layer.cells.reduce((subtotal, batch) => subtotal + batch.cell_count, 0),
+    0,
+  );
+  status.textContent =
+    `adaptive frontier · ${integerFormat(response.primitive_count)} primitives · ` +
+    `${integerFormat(exactPoints)} exact points + ` +
+    `${integerFormat(aggregateCells)} aggregate cells`;
 }
 
 function orderedManifestLayers(): LayerManifest[] {
@@ -528,8 +627,6 @@ function renderLegend() {
 function tooltip(info: PickingInfo<PlotDatum>) {
   if (!manifest || !currentResponse || !info.object) return null;
   const layer = layerManifest(info.object.layerId);
-  const layerResponse = currentResponse.layers.find(item => item.id === layer.id);
-  if (!layerResponse) return null;
   const [relativeX, relativeY] = localToWorld(renderOrigin, info.object.position);
   const absoluteX = addIntegerOffset(manifest.origin.x, relativeX);
   const absoluteY = addIntegerOffset(manifest.origin.y, relativeY);
@@ -538,12 +635,18 @@ function tooltip(info: PickingInfo<PlotDatum>) {
   if (label) lines.push(escapeHtml(label));
   lines.push(`x: ${escapeHtml(absoluteX)}`, `y: ${escapeHtml(absoluteY)}`);
 
-  if (layerResponse.mode === 'aggregate') {
+  if (info.object.kind === 'cell') {
+    if (info.object.level !== undefined) {
+      lines.push(`LOD: ${info.object.level}`);
+    }
     lines.push(`count: ${integerFormat(info.object.count)}`);
     for (const definition of layer.aggregates ?? []) {
       const value = info.object.aggregates[definition.key];
       if (value !== undefined) {
-        lines.push(`${escapeHtml(definition.reducer)}(${escapeHtml(definition.source)}): ${escapeHtml(compactFormat(value))}`);
+        lines.push(
+          `${escapeHtml(definition.reducer)}(${escapeHtml(definition.source)}): ` +
+          escapeHtml(compactFormat(value)),
+        );
       }
     }
   } else if (layer.plot) {
@@ -630,9 +733,9 @@ function appendText(
 
 homeButton.addEventListener('click', goHome);
 window.addEventListener('keydown', event => {
-  if (event.key === 'Home' && document.activeElement !== maxPointsInput) goHome();
+  if (event.key === 'Home' && document.activeElement !== maxPrimitivesInput) goHome();
 });
-maxPointsInput.addEventListener('change', () => scheduleViewRequest(0));
+maxPrimitivesInput.addEventListener('change', () => scheduleViewRequest(0));
 new ResizeObserver(() => {
   renderAxes();
   scheduleViewRequest(100);
