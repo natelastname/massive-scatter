@@ -16,8 +16,8 @@ sparse point sets:
 - mergeable field reductions (`sum`, `mean`, `min`, `max`) compiled from plot
   encodings;
 - a FastAPI viewport service;
-- a deck.gl orthographic viewer with pan/zoom, axes, hover values, per-point
-  styling, and generated legends.
+- a deck.gl orthographic viewer with pan/zoom, axes, hover values, generated
+  legends, and typed/binary GPU attributes rather than object-per-primitive input.
 
 ## Why this does not allocate the rectangular figure
 
@@ -46,8 +46,9 @@ and sparse LOD pyramid are independent of every other layer; only the figure
 bounds, axes, camera, and legend are shared.
 
 The finest numerical LOD begins at `base_cell_size` units per cell (64 by
-default). Below that scale the viewer asks for exact points. Aggregate cells are
-rendered as the square spatial bins they represent.
+default). It is the last aggregate level of the same implicit tree: selected
+level-zero cells can refine further to their exact source-point leaves. Aggregate
+cells are rendered as the square spatial bins they represent.
 
 Only occupied cells are stored. Empty cells in the logical rectangle consume no
 LOD rows, files, or chunks. During construction a temporary on-disk SQLite
@@ -206,9 +207,9 @@ The iterable form lets generated or streamed data remain bounded-memory instead
 of first materializing the full dataset in Python.
 
 Repeated `scatter()` calls create independent layers on the same axes. Each layer
-keeps its own exact-point store, sparse LOD pyramid, reducers, styling, and exact-vs-
-aggregate decision while sharing the figure camera, axes, and legend. Call order is
-the default z-order; pass `zorder=` to override it.
+keeps its own exact-point store, sparse LOD pyramid, reducers, styling, and adaptive
+frontier while sharing the figure camera, axes, and legend. Call order is the
+default z-order; pass `zorder=` to override it.
 
 `c=` and `color=` are mutually exclusive. `c=` means a data mapping; `color=`
 means a constant CSS color.
@@ -388,6 +389,13 @@ replaces the old separate exact-point and aggregate-cell budgets.
 `target_cell_pixels` controls the desired maximum projected width of an aggregate
 cell before the selector tries to refine it.
 
+The GPU is only the terminal rasterizer. After the frontier is selected, the viewer
+packs positions, colors, and sizes into typed deck.gl binary attributes and avoids
+creating one JavaScript object per visible primitive. Picking uses compact response
+arrays as sidecars indexed by deck.gl's picking index. The HTTP response is still
+JSON today, so JSON parsing and the subsequent typed-array packing remain a future
+transport optimization target (for example Arrow IPC).
+
 ### Titles, labels, and legends
 
 Axes metadata can be set using either dedicated methods:
@@ -566,10 +574,11 @@ segmented/BigInt camera state, not merely a different storage type.
 ```
 
 The response has one shared viewport-local origin plus a `layers` array. Each
-layer independently returns either exact points or sparse aggregate cells, so a
-sparse layer can remain exact while a denser layer in the same viewport moves to
-a coarser LOD. All layer coordinates are rebased into the shared response origin
-before transfer. No raster image tiles are generated or transferred.
+layer returns an adaptive frontier containing an exact-point batch plus zero or more
+aggregate-cell batches at potentially different LOD levels. Sparse branches can
+therefore reach exact leaves while dense branches in the same layer remain coarse.
+All coordinates are rebased into the shared response origin before transfer. No
+raster image tiles are generated or transferred.
 
 ## Development
 
